@@ -135,11 +135,7 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 		return
 	}
 	// Not allowed: cache and request admin
-	u := auth.User{ID: msg.From.ID, Username: msg.From.UserName, FirstName: msg.From.FirstName, LastName: msg.From.LastName}
-	b.pending[msg.From.ID] = u
-	if b.pendingRepo != nil {
-		_ = b.pendingRepo.Upsert(u)
-	}
+	b.pending[msg.From.ID] = auth.User{ID: msg.From.ID, Username: msg.From.UserName, FirstName: msg.From.FirstName, LastName: msg.From.LastName}
 	b.notifyAdminRequest(msg.From.ID, msg.From.UserName)
 	b.sendMessage(msg.Chat.ID, welcome+"\n\nЗапрос на доступ отправлен администратору. Как только он подтвердит, вы получите уведомление.")
 }
@@ -272,6 +268,9 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 
 	msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
 	msgOut.ReplyMarkup = b.menuKeyboard()
+	if b.parseMode != "" {
+		msgOut.ParseMode = b.parseMode
+	}
 	if _, err := b.s.Send(msgOut); err != nil {
 		log.Printf("failed to send message: %v", err)
 	}
@@ -290,6 +289,9 @@ func (b *Bot) notifyAdminRequest(userID int64, username string) {
 	)
 	msg := tgbotapi.NewMessage(b.adminUserID, text)
 	msg.ReplyMarkup = kb
+	if b.parseMode != "" {
+		msg.ParseMode = b.parseMode
+	}
 	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to notify admin: %v", err)
 	}
@@ -299,7 +301,11 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	switch {
 	case cb.Data == resetCmd:
 		b.history.Reset(cb.From.ID)
-		if _, err := b.s.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Контекст сброшен")); err != nil {
+		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, "Контекст сброшен")
+		if b.parseMode != "" {
+			msg.ParseMode = b.parseMode
+		}
+		if _, err := b.s.Send(msg); err != nil {
 			log.Printf("failed to send reset confirmation: %v", err)
 		}
 	case cb.Data == summaryCmd:
@@ -314,7 +320,11 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	h := b.history.Get(cb.From.ID)
 	if len(h) == 0 {
-		if _, err := b.s.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "История пуста")); err != nil {
+		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, "История пуста")
+		if b.parseMode != "" {
+			msg.ParseMode = b.parseMode
+		}
+		if _, err := b.s.Send(msg); err != nil {
 			log.Printf("failed to send empty history notice: %v", err)
 		}
 		return
@@ -325,8 +335,11 @@ func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 
 	resp, err := b.llmClient.Generate(ctx, msgs)
 	if err != nil {
-		log.Printf("failed to generate summary: %v", err)
-		if _, err := b.s.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Не удалось собрать саммари")); err != nil {
+		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, "Не удалось собрать саммари")
+		if b.parseMode != "" {
+			msg.ParseMode = b.parseMode
+		}
+		if _, err := b.s.Send(msg); err != nil {
 			log.Printf("failed to send summary error: %v", err)
 		}
 		return
@@ -344,6 +357,9 @@ func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	meta := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
 	final := meta + "\n\n" + resp.Content
 	msg := tgbotapi.NewMessage(cb.Message.Chat.ID, final)
+	if b.parseMode != "" {
+		msg.ParseMode = b.parseMode
+	}
 	msg.ReplyMarkup = b.menuKeyboard()
 	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to send summary: %v", err)
@@ -377,10 +393,18 @@ func (b *Bot) approveUser(userID int64, notifyChatID int64) {
 	if b.pendingRepo != nil {
 		_ = b.pendingRepo.Remove(userID)
 	}
-	if _, err := b.s.Send(tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователь %d разрешен", userID))); err != nil {
+	msg := tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователь %d разрешен", userID))
+	if b.parseMode != "" {
+		msg.ParseMode = b.parseMode
+	}
+	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to notify approval: %v", err)
 	}
-	if _, err := b.s.Send(tgbotapi.NewMessage(userID, "Доступ к боту разрешён. Можете пользоваться.")); err != nil {
+	msg2 := tgbotapi.NewMessage(userID, "Доступ к боту разрешён. Можете пользоваться.")
+	if b.parseMode != "" {
+		msg2.ParseMode = b.parseMode
+	}
+	if _, err := b.s.Send(msg2); err != nil {
 		log.Printf("failed to notify user approval: %v", err)
 	}
 }
@@ -391,7 +415,11 @@ func (b *Bot) denyUser(userID int64, notifyChatID int64) {
 	if b.pendingRepo != nil {
 		_ = b.pendingRepo.Remove(userID)
 	}
-	if _, err := b.s.Send(tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователю %d отказано", userID))); err != nil {
+	msg := tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователю %d отказано", userID))
+	if b.parseMode != "" {
+		msg.ParseMode = b.parseMode
+	}
+	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to notify denial: %v", err)
 	}
 }

@@ -39,7 +39,7 @@ type Config struct {
 	PendingFilePath   string `env:"PENDING_FILE_PATH" envDefault:"data/pending.json"`
 
 	// Formatting
-	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"HTML"`
+	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"MarkdownV2"`
 }
 
 func New() *Config {
