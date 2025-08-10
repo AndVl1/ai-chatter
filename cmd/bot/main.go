@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 
@@ -39,7 +40,17 @@ func main() {
 		log.Fatalf("failed to init auth: %v", err)
 	}
 
-	llmClient, err := newLLMClient(cfg)
+	// Resolve provider/model with overrides
+	prov := string(cfg.LLMProvider)
+	if s := readTrim(cfg.ProviderFilePath); s != "" {
+		prov = s
+	}
+	model := cfg.OpenAIModel
+	if s := readTrim(cfg.ModelFilePath); s != "" {
+		model = s
+	}
+
+	llmClient, err := newLLMClientWith(prov, cfg, model)
 	if err != nil {
 		log.Fatalf("failed to create llm client: %v", err)
 	}
@@ -75,8 +86,14 @@ func main() {
 		cfg.AdminUserID,
 		pRepo,
 		cfg.MessageParseMode,
-		string(cfg.LLMProvider),
-		cfg.OpenAIModel,
+		prov,
+		model,
+		cfg.OpenAIAPIKey,
+		cfg.OpenAIBaseURL,
+		cfg.OpenRouterReferrer,
+		cfg.OpenRouterTitle,
+		cfg.YandexOAuthToken,
+		cfg.YandexFolderID,
 	)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)
@@ -97,13 +114,25 @@ func readSystemPrompt(path string) string {
 	return string(data)
 }
 
+func readTrim(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
 func newLLMClient(cfg *config.Config) (llm.Client, error) {
-	switch cfg.LLMProvider {
-	case config.ProviderOpenAI:
-		return llm.NewOpenAI(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, cfg.OpenAIModel, cfg.OpenRouterReferrer, cfg.OpenRouterTitle), nil
-	case config.ProviderYandex:
+	return newLLMClientWith(string(cfg.LLMProvider), cfg, cfg.OpenAIModel)
+}
+
+func newLLMClientWith(provider string, cfg *config.Config, model string) (llm.Client, error) {
+	switch provider {
+	case string(config.ProviderOpenAI):
+		return llm.NewOpenAI(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, model, cfg.OpenRouterReferrer, cfg.OpenRouterTitle), nil
+	case string(config.ProviderYandex):
 		return llm.NewYandex(cfg.YandexOAuthToken, cfg.YandexFolderID)
 	default:
-		return nil, fmt.Errorf("unknown llm provider: %s", cfg.LLMProvider)
+		return nil, fmt.Errorf("unknown llm provider: %s", provider)
 	}
 }

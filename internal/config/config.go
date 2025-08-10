@@ -39,7 +39,11 @@ type Config struct {
 	PendingFilePath   string `env:"PENDING_FILE_PATH" envDefault:"data/pending.json"`
 
 	// Formatting
-	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"MarkdownV2"`
+	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"Markdown"`
+
+	// Overrides persistence
+	ProviderFilePath string `env:"PROVIDER_FILE_PATH" envDefault:"data/provider.txt"`
+	ModelFilePath    string `env:"MODEL_FILE_PATH" envDefault:"data/model.txt"`
 }
 
 func New() *Config {

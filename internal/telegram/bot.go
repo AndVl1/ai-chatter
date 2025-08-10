@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -28,6 +30,7 @@ type Bot struct {
 	authSvc      *auth.Service
 	systemPrompt string
 	llmClient    llm.Client
+	llmMu        sync.RWMutex
 	history      *history.Manager
 	recorder     storage.Recorder
 	adminUserID  int64
@@ -36,6 +39,13 @@ type Bot struct {
 	parseMode    string
 	provider     string
 	model        string
+	// creds for rebuilding clients
+	openaiAPIKey       string
+	openaiBaseURL      string
+	openRouterReferrer string
+	openRouterTitle    string
+	yandexOAuthToken   string
+	yandexFolderID     string
 }
 
 func New(
@@ -49,26 +59,38 @@ func New(
 	parseMode string,
 	provider string,
 	model string,
+	openaiAPIKey string,
+	openaiBaseURL string,
+	openRouterReferrer string,
+	openRouterTitle string,
+	yandexOAuthToken string,
+	yandexFolderID string,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		return nil, err
 	}
 	b := &Bot{
-		api:          api,
-		s:            botAPISender{api: api},
-		authSvc:      authSvc,
-		llmClient:    llmClient,
-		systemPrompt: systemPrompt,
-		history:      history.NewManager(),
-		recorder:     rec,
-		adminUserID:  adminUserID,
-		pending:      make(map[int64]auth.User),
-		pendingRepo:  pendingRepo,
-		parseMode:    parseMode,
-		provider:     provider,
-		model:        model,
+		api:                api,
+		s:                  botAPISender{api: api},
+		authSvc:            authSvc,
+		systemPrompt:       systemPrompt,
+		history:            history.NewManager(),
+		recorder:           rec,
+		adminUserID:        adminUserID,
+		pending:            make(map[int64]auth.User),
+		pendingRepo:        pendingRepo,
+		parseMode:          parseMode,
+		provider:           provider,
+		model:              model,
+		openaiAPIKey:       openaiAPIKey,
+		openaiBaseURL:      openaiBaseURL,
+		openRouterReferrer: openRouterReferrer,
+		openRouterTitle:    openRouterTitle,
+		yandexOAuthToken:   yandexOAuthToken,
+		yandexFolderID:     yandexFolderID,
 	}
+	b.setLLMClient(llmClient)
 	// Preload history from recorder
 	if rec != nil {
 		if events, err := rec.LoadInteractions(); err == nil {
@@ -94,6 +116,36 @@ func New(
 		}
 	}
 	return b, nil
+}
+
+func (b *Bot) getLLMClient() llm.Client {
+	b.llmMu.RLock()
+	defer b.llmMu.RUnlock()
+	return b.llmClient
+}
+
+func (b *Bot) setLLMClient(c llm.Client) {
+	b.llmMu.Lock()
+	defer b.llmMu.Unlock()
+	b.llmClient = c
+}
+
+func (b *Bot) reloadLLMClient() error {
+	var newCli llm.Client
+	switch strings.ToLower(b.provider) {
+	case "openai":
+		newCli = llm.NewOpenAI(b.openaiAPIKey, b.openaiBaseURL, b.model, b.openRouterReferrer, b.openRouterTitle)
+	case "yandex":
+		cli, err := llm.NewYandex(b.yandexOAuthToken, b.yandexFolderID)
+		if err != nil {
+			return err
+		}
+		newCli = cli
+	default:
+		return fmt.Errorf("unknown provider: %s", b.provider)
+	}
+	b.setLLMClient(newCli)
+	return nil
 }
 
 func (b *Bot) Start(ctx context.Context) {
@@ -141,8 +193,12 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 }
 
 func (b *Bot) handleCommand(msg *tgbotapi.Message) {
-	// Admin-only commands below
+	if msg.Command() == "provider" || msg.Command() == "model" {
+		b.handleAdminConfigCommands(msg)
+		return
+	}
 	if msg.From.ID != b.adminUserID {
+		b.sendMessage(msg.Chat.ID, "Команда доступна только администратору")
 		return
 	}
 	switch msg.Command() {
@@ -203,6 +259,58 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 	}
 }
 
+func (b *Bot) handleAdminConfigCommands(msg *tgbotapi.Message) {
+	if msg.From.ID != b.adminUserID {
+		b.sendMessage(msg.Chat.ID, "Команда доступна только администратору")
+		return
+	}
+	cmd := msg.Command()
+	args := strings.Fields(msg.CommandArguments())
+	switch cmd {
+	case "provider":
+		if len(args) != 1 {
+			b.sendMessage(msg.Chat.ID, "Usage: /provider <openai|yandex>")
+			return
+		}
+		prov := strings.ToLower(args[0])
+		if prov != "openai" && prov != "yandex" {
+			b.sendMessage(msg.Chat.ID, "Поддерживаются: openai, yandex")
+			return
+		}
+		if err := os.WriteFile("data/provider.txt", []byte(prov), 0o644); err != nil {
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Ошибка сохранения: %v", err))
+			return
+		}
+		b.provider = prov
+		if err := b.reloadLLMClient(); err != nil {
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Ошибка перезагрузки клиента: %v", err))
+			return
+		}
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("Провайдер установлен и применён: %s", prov))
+	case "model":
+		if len(args) != 1 {
+			b.sendMessage(msg.Chat.ID, "Usage: /model <openai/gpt-5-nano|openai/gpt-oss-20b:free|qwen/qwen3-coder>")
+			return
+		}
+		model := args[0]
+		allowed := map[string]bool{"openai/gpt-5-nano": true, "openai/gpt-oss-20b:free": true, "qwen/qwen3-coder": true}
+		if !allowed[model] {
+			b.sendMessage(msg.Chat.ID, "Неподдерживаемая модель. Доступные: openai/gpt-5-nano, openai/gpt-oss-20b:free, qwen/qwen3-coder")
+			return
+		}
+		if err := os.WriteFile("data/model.txt", []byte(model), 0o644); err != nil {
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Ошибка сохранения: %v", err))
+			return
+		}
+		b.model = model
+		if err := b.reloadLLMClient(); err != nil {
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Ошибка перезагрузки клиента: %v", err))
+			return
+		}
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("Модель установлена и применена: %s", model))
+	}
+}
+
 func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) {
 	if !b.authSvc.IsAllowed(msg.From.ID) {
 		log.Printf("Unauthorized access attempt by user ID: %d, username: @%s", msg.From.ID, msg.From.UserName)
@@ -242,7 +350,7 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 	}
 	contextMsgs = append(contextMsgs, b.history.Get(msg.From.ID)...)
 
-	resp, err := b.llmClient.Generate(ctx, contextMsgs)
+	resp, err := b.getLLMClient().Generate(ctx, contextMsgs)
 	if err != nil {
 		log.Printf("failed to generate text: %v", err)
 		b.sendMessage(msg.Chat.ID, "Sorry, something went wrong.")
@@ -333,7 +441,7 @@ func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	msgs = append(msgs, llm.Message{Role: "system", Content: "Суммируй переписку пользователя с ассистентом. Дай краткое саммари с ключевыми темами, выводами и нерешёнными вопросами. Не выдумывай факты."})
 	msgs = append(msgs, h...)
 
-	resp, err := b.llmClient.Generate(ctx, msgs)
+	resp, err := b.getLLMClient().Generate(ctx, msgs)
 	if err != nil {
 		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, "Не удалось собрать саммари")
 		if b.parseMode != "" {
