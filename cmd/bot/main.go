@@ -11,6 +11,7 @@ import (
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/config"
 	"ai-chatter/internal/llm"
+	"ai-chatter/internal/pending"
 	"ai-chatter/internal/storage"
 	"ai-chatter/internal/telegram"
 )
@@ -55,7 +56,17 @@ func main() {
 		}
 	}
 
-	bot, err := telegram.New(cfg.TelegramBotToken, authSvc, llmClient, systemPrompt, rec, cfg.AdminUserID)
+	var pRepo pending.Repository
+	if cfg.PendingFilePath != "" {
+		pr, err := pending.NewFileRepository(cfg.PendingFilePath)
+		if err != nil {
+			log.Printf("failed to init pending repo: %v", err)
+		} else {
+			pRepo = pr
+		}
+	}
+
+	bot, err := telegram.New(cfg.TelegramBotToken, authSvc, llmClient, systemPrompt, rec, cfg.AdminUserID, pRepo)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)
 	}

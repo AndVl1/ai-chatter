@@ -32,6 +32,7 @@ type Config struct {
 	// Storage
 	LogFilePath       string `env:"LOG_FILE_PATH" envDefault:"logs/log.jsonl"`
 	AllowlistFilePath string `env:"ALLOWLIST_FILE_PATH" envDefault:"data/allowlist.json"`
+	PendingFilePath   string `env:"PENDING_FILE_PATH" envDefault:"data/pending.json"`
 }
 
 func New() *Config {

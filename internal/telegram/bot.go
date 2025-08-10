@@ -13,6 +13,7 @@ import (
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/history"
 	"ai-chatter/internal/llm"
+	"ai-chatter/internal/pending"
 	"ai-chatter/internal/storage"
 )
 
@@ -30,9 +31,10 @@ type Bot struct {
 	recorder     storage.Recorder
 	adminUserID  int64
 	pending      map[int64]auth.User
+	pendingRepo  pending.Repository
 }
 
-func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPrompt string, rec storage.Recorder, adminUserID int64) (*Bot, error) {
+func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPrompt string, rec storage.Recorder, adminUserID int64, pendingRepo pending.Repository) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		return nil, err
@@ -46,6 +48,7 @@ func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPro
 		recorder:     rec,
 		adminUserID:  adminUserID,
 		pending:      make(map[int64]auth.User),
+		pendingRepo:  pendingRepo,
 	}
 	// Preload history from recorder
 	if rec != nil {
@@ -63,6 +66,14 @@ func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPro
 			}
 		}
 	}
+	// Preload pending from repository
+	if b.pendingRepo != nil {
+		if items, err := b.pendingRepo.LoadAll(); err == nil {
+			for _, u := range items {
+				b.pending[u.ID] = u
+			}
+		}
+	}
 	return b, nil
 }
 
@@ -75,6 +86,10 @@ func (b *Bot) Start(ctx context.Context) {
 	for update := range updates {
 		if update.Message != nil {
 			if update.Message.IsCommand() {
+				if update.Message.Command() == "start" {
+					b.handleStart(update.Message)
+					continue
+				}
 				b.handleCommand(update.Message)
 				continue
 			}
@@ -88,7 +103,24 @@ func (b *Bot) Start(ctx context.Context) {
 	}
 }
 
+func (b *Bot) handleStart(msg *tgbotapi.Message) {
+	welcome := "Привет! Я LLM-бот. Отвечаю на вопросы с учётом контекста. Под каждым ответом есть кнопки: ‘История’ (саммари диалога) и ‘Сбросить контекст’."
+	if b.authSvc.IsAllowed(msg.From.ID) {
+		b.sendMessage(msg.Chat.ID, welcome+"\n\nДоступ уже предоставлен. Можете писать сообщение.")
+		return
+	}
+	// Not allowed: cache and request admin
+	u := auth.User{ID: msg.From.ID, Username: msg.From.UserName, FirstName: msg.From.FirstName, LastName: msg.From.LastName}
+	b.pending[msg.From.ID] = u
+	if b.pendingRepo != nil {
+		_ = b.pendingRepo.Upsert(u)
+	}
+	b.notifyAdminRequest(msg.From.ID, msg.From.UserName)
+	b.sendMessage(msg.Chat.ID, welcome+"\n\nЗапрос на доступ отправлен администратору. Как только он подтвердит, вы получите уведомление.")
+}
+
 func (b *Bot) handleCommand(msg *tgbotapi.Message) {
+	// Admin-only commands below
 	if msg.From.ID != b.adminUserID {
 		return
 	}
@@ -116,15 +148,55 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 			return
 		}
 		b.sendMessage(msg.Chat.ID, fmt.Sprintf("Пользователь %d удален из allowlist", uid))
+	case "pending":
+		var bld strings.Builder
+		bld.WriteString("Pending заявки:\n")
+		for _, u := range b.pending {
+			bld.WriteString(fmt.Sprintf("- id=%d, username=@%s, name=%s %s\n", u.ID, u.Username, u.FirstName, u.LastName))
+		}
+		b.sendMessage(msg.Chat.ID, bld.String())
+	case "approve":
+		args := strings.Fields(msg.CommandArguments())
+		if len(args) != 1 {
+			b.sendMessage(msg.Chat.ID, "Usage: /approve <user_id>")
+			return
+		}
+		uid, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil {
+			b.sendMessage(msg.Chat.ID, "Некорректный user_id")
+			return
+		}
+		b.approveUser(uid, msg.Chat.ID)
+	case "deny":
+		args := strings.Fields(msg.CommandArguments())
+		if len(args) != 1 {
+			b.sendMessage(msg.Chat.ID, "Usage: /deny <user_id>")
+			return
+		}
+		uid, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil {
+			b.sendMessage(msg.Chat.ID, "Некорректный user_id")
+			return
+		}
+		b.denyUser(uid, msg.Chat.ID)
 	}
 }
 
 func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) {
 	if !b.authSvc.IsAllowed(msg.From.ID) {
 		log.Printf("Unauthorized access attempt by user ID: %d, username: @%s", msg.From.ID, msg.From.UserName)
-		// cache pending user data
-		b.pending[msg.From.ID] = auth.User{ID: msg.From.ID, Username: msg.From.UserName, FirstName: msg.From.FirstName, LastName: msg.From.LastName}
-		b.sendMessage(msg.Chat.ID, "запрос отправлен на проверку")
+		// If already pending, inform user and don't spam admin
+		if _, ok := b.pending[msg.From.ID]; ok {
+			b.sendMessage(msg.Chat.ID, "Ваш запрос на доступ уже отправлен администратору. Пожалуйста, ожидайте подтверждения. Как только доступ будет предоставлен, я уведомлю вас.")
+			return
+		}
+		// cache pending user data and notify admin once
+		u := auth.User{ID: msg.From.ID, Username: msg.From.UserName, FirstName: msg.From.FirstName, LastName: msg.From.LastName}
+		b.pending[msg.From.ID] = u
+		if b.pendingRepo != nil {
+			_ = b.pendingRepo.Upsert(u)
+		}
+		b.sendMessage(msg.Chat.ID, "Запрос на доступ отправлен администратору. Как только он подтвердит, вы получите уведомление.")
 		b.notifyAdminRequest(msg.From.ID, msg.From.UserName)
 		return
 	}
@@ -264,25 +336,38 @@ func (b *Bot) handleApproval(cb *tgbotapi.CallbackQuery, approve bool) {
 		return
 	}
 	if approve {
-		u := b.pending[userID]
-		if u.ID == 0 { // fallback if no pending cache
-			u = auth.User{ID: userID}
-		}
-		_ = b.authSvc.Upsert(u)
-		delete(b.pending, userID)
-		if _, err := b.api.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, fmt.Sprintf("Пользователь %d разрешен", userID))); err != nil {
-			log.Printf("failed to notify approval: %v", err)
-		}
-		// Notify the user about approval
-		if _, err := b.api.Send(tgbotapi.NewMessage(userID, "Доступ к боту разрешён. Можете пользоваться.")); err != nil {
-			log.Printf("failed to notify user approval: %v", err)
-		}
+		b.approveUser(userID, cb.Message.Chat.ID)
 	} else {
-		_ = b.authSvc.Remove(userID)
-		delete(b.pending, userID)
-		if _, err := b.api.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, fmt.Sprintf("Пользователю %d отказано", userID))); err != nil {
-			log.Printf("failed to notify denial: %v", err)
-		}
+		b.denyUser(userID, cb.Message.Chat.ID)
+	}
+}
+
+func (b *Bot) approveUser(userID int64, notifyChatID int64) {
+	u := b.pending[userID]
+	if u.ID == 0 { // fallback if no pending cache
+		u = auth.User{ID: userID}
+	}
+	_ = b.authSvc.Upsert(u)
+	delete(b.pending, userID)
+	if b.pendingRepo != nil {
+		_ = b.pendingRepo.Remove(userID)
+	}
+	if _, err := b.api.Send(tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователь %d разрешен", userID))); err != nil {
+		log.Printf("failed to notify approval: %v", err)
+	}
+	if _, err := b.api.Send(tgbotapi.NewMessage(userID, "Доступ к боту разрешён. Можете пользоваться.")); err != nil {
+		log.Printf("failed to notify user approval: %v", err)
+	}
+}
+
+func (b *Bot) denyUser(userID int64, notifyChatID int64) {
+	_ = b.authSvc.Remove(userID)
+	delete(b.pending, userID)
+	if b.pendingRepo != nil {
+		_ = b.pendingRepo.Remove(userID)
+	}
+	if _, err := b.api.Send(tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователю %d отказано", userID))); err != nil {
+		log.Printf("failed to notify denial: %v", err)
 	}
 }
 

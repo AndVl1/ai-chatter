@@ -29,4 +29,8 @@ All notable changes to this project will be documented in this file.
 - **History Restore**: On startup, the bot preloads events from the recorder and reconstructs per-user history.
 - **Config**: Added `LOG_FILE_PATH` env var to configure the path for JSONL log file.
 - **Admin Approval Flow**: Added `ADMIN_USER` env var. Unauthorized user requests are sent to the admin with inline buttons "разрешить"/"запретить".
-- **Allowlist Storage**: Introduced `auth.Repository` abstraction and file-based JSON allowlist (`ALLOWLIST_FILE_PATH`, default `data/allowlist.json`) storing `{id, username}`; approvals/denials update file and in-memory state.
+- **Allowlist Storage**: Introduced `auth.Repository` abstraction and file-based JSON allowlist (`ALLOWLIST_FILE_PATH`, default `data/allowlist.json`) storing `{id, username, first_name, last_name}`; approvals/denials update file and in-memory state.
+- **/start Improvements**: Added welcome message with hints about inline buttons; auto-sends access request to admin and informs the user.
+- **Pending Storage**: Added file-based pending repository (`PENDING_FILE_PATH`, default `data/pending.json`) to persist pending access requests across restarts.
+- **Admin Pending Commands**: Added `/pending` to list pending users and `/approve <user_id>`, `/deny <user_id>` to allow/deny; updates pending file and allowlist on the fly.
+- **Pending UX**: If a user has already requested access, bot no longer spams admin and informs the user to wait for approval.
