@@ -148,6 +148,47 @@ func (b *Bot) reloadLLMClient() error {
 	return nil
 }
 
+func (b *Bot) escapeIfNeeded(s string) string {
+	if strings.EqualFold(b.parseMode, string(tgbotapi.ModeMarkdownV2)) {
+		return escapeMarkdownV2(s)
+	}
+	return s
+}
+
+func escapeMarkdownV2(s string) string {
+	repl := strings.NewReplacer(
+		"_", "\\_",
+		"*", "\\*",
+		"[", "\\[",
+		"]", "\\]",
+		"(", "\\(",
+		")", "\\)",
+		"~", "\\~",
+		"`", "\\`",
+		">", "\\>",
+		"#", "\\#",
+		"+", "\\+",
+		"-", "\\-",
+		"=", "\\=",
+		"|", "\\|",
+		"{", "\\{",
+		"}", "\\}",
+		".", "\\.",
+		"!", "\\!",
+	)
+	return repl.Replace(s)
+}
+
+func (b *Bot) parseModeValue() string {
+	s := strings.ToLower(b.parseMode)
+	switch s {
+	case strings.ToLower(tgbotapi.ModeMarkdown), strings.ToLower(tgbotapi.ModeMarkdownV2), strings.ToLower(tgbotapi.ModeHTML):
+		return b.parseMode
+	default:
+		return tgbotapi.ModeHTML
+	}
+}
+
 func (b *Bot) Start(ctx context.Context) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
@@ -372,13 +413,12 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 		resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
 
 	meta := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
-	final := meta + "\n\n" + resp.Content
+	metaEsc := b.escapeIfNeeded(meta)
+	final := metaEsc + "\n\n" + resp.Content
 
 	msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
 	msgOut.ReplyMarkup = b.menuKeyboard()
-	if b.parseMode != "" {
-		msgOut.ParseMode = b.parseMode
-	}
+	msgOut.ParseMode = b.parseModeValue()
 	if _, err := b.s.Send(msgOut); err != nil {
 		log.Printf("failed to send message: %v", err)
 	}
@@ -395,14 +435,10 @@ func (b *Bot) notifyAdminRequest(userID int64, username string) {
 			tgbotapi.NewInlineKeyboardButtonData("запретить", denyPrefix+strconv.FormatInt(userID, 10)),
 		),
 	)
-	msg := tgbotapi.NewMessage(b.adminUserID, text)
+	msg := tgbotapi.NewMessage(b.adminUserID, b.escapeIfNeeded(text))
+	msg.ParseMode = b.parseModeValue()
 	msg.ReplyMarkup = kb
-	if b.parseMode != "" {
-		msg.ParseMode = b.parseMode
-	}
-	if _, err := b.s.Send(msg); err != nil {
-		log.Printf("failed to notify admin: %v", err)
-	}
+	_, _ = b.s.Send(msg)
 }
 
 func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
@@ -410,9 +446,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	case cb.Data == resetCmd:
 		b.history.Reset(cb.From.ID)
 		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, "Контекст сброшен")
-		if b.parseMode != "" {
-			msg.ParseMode = b.parseMode
-		}
+		msg.ParseMode = b.parseModeValue()
 		if _, err := b.s.Send(msg); err != nil {
 			log.Printf("failed to send reset confirmation: %v", err)
 		}
@@ -428,10 +462,8 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	h := b.history.Get(cb.From.ID)
 	if len(h) == 0 {
-		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, "История пуста")
-		if b.parseMode != "" {
-			msg.ParseMode = b.parseMode
-		}
+		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, b.escapeIfNeeded("История пуста"))
+		msg.ParseMode = b.parseModeValue()
 		if _, err := b.s.Send(msg); err != nil {
 			log.Printf("failed to send empty history notice: %v", err)
 		}
@@ -443,18 +475,15 @@ func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 
 	resp, err := b.getLLMClient().Generate(ctx, msgs)
 	if err != nil {
-		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, "Не удалось собрать саммари")
-		if b.parseMode != "" {
-			msg.ParseMode = b.parseMode
-		}
+		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, b.escapeIfNeeded("Не удалось собрать саммари"))
+		msg.ParseMode = b.parseModeValue()
 		if _, err := b.s.Send(msg); err != nil {
 			log.Printf("failed to send summary error: %v", err)
 		}
 		return
 	}
 
-	log.Printf("Summary [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q",
-		resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
+	log.Printf("Summary [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
 	b.history.AppendUser(cb.From.ID, "[команда] история")
 	b.history.AppendAssistant(cb.From.ID, resp.Content)
 	if b.recorder != nil {
@@ -463,11 +492,10 @@ func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	}
 
 	meta := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
-	final := meta + "\n\n" + resp.Content
+	metaEsc := b.escapeIfNeeded(meta)
+	final := metaEsc + "\n\n" + resp.Content
 	msg := tgbotapi.NewMessage(cb.Message.Chat.ID, final)
-	if b.parseMode != "" {
-		msg.ParseMode = b.parseMode
-	}
+	msg.ParseMode = b.parseModeValue()
 	msg.ReplyMarkup = b.menuKeyboard()
 	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to send summary: %v", err)
@@ -502,16 +530,12 @@ func (b *Bot) approveUser(userID int64, notifyChatID int64) {
 		_ = b.pendingRepo.Remove(userID)
 	}
 	msg := tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователь %d разрешен", userID))
-	if b.parseMode != "" {
-		msg.ParseMode = b.parseMode
-	}
+	msg.ParseMode = b.parseModeValue()
 	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to notify approval: %v", err)
 	}
 	msg2 := tgbotapi.NewMessage(userID, "Доступ к боту разрешён. Можете пользоваться.")
-	if b.parseMode != "" {
-		msg2.ParseMode = b.parseMode
-	}
+	msg2.ParseMode = b.parseModeValue()
 	if _, err := b.s.Send(msg2); err != nil {
 		log.Printf("failed to notify user approval: %v", err)
 	}
@@ -524,9 +548,7 @@ func (b *Bot) denyUser(userID int64, notifyChatID int64) {
 		_ = b.pendingRepo.Remove(userID)
 	}
 	msg := tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователю %d отказано", userID))
-	if b.parseMode != "" {
-		msg.ParseMode = b.parseMode
-	}
+	msg.ParseMode = b.parseModeValue()
 	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to notify denial: %v", err)
 	}
@@ -542,11 +564,7 @@ func (b *Bot) menuKeyboard() tgbotapi.InlineKeyboardMarkup {
 }
 
 func (b *Bot) sendMessage(chatID int64, text string) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	if b.parseMode != "" {
-		msg.ParseMode = b.parseMode
-	}
-	if _, err := b.s.Send(msg); err != nil {
-		log.Printf("failed to send message: %v", err)
-	}
+	msg := tgbotapi.NewMessage(chatID, b.escapeIfNeeded(text))
+	msg.ParseMode = b.parseModeValue()
+	_, _ = b.s.Send(msg)
 }

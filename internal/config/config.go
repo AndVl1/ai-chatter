@@ -38,12 +38,12 @@ type Config struct {
 	AllowlistFilePath string `env:"ALLOWLIST_FILE_PATH" envDefault:"data/allowlist.json"`
 	PendingFilePath   string `env:"PENDING_FILE_PATH" envDefault:"data/pending.json"`
 
-	// Formatting
-	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"MarkdownV2"`
-
 	// Overrides persistence
 	ProviderFilePath string `env:"PROVIDER_FILE_PATH" envDefault:"data/provider.txt"`
 	ModelFilePath    string `env:"MODEL_FILE_PATH" envDefault:"data/model.txt"`
+
+	// Formatting
+	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"HTML"`
 }
 
 func New() *Config {
