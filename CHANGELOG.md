@@ -28,3 +28,5 @@ All notable changes to this project will be documented in this file.
 - **File Logger (JSONL)**: Implemented file-based recorder writing one JSON per line to `LOG_FILE_PATH` (default `logs/log.jsonl`).
 - **History Restore**: On startup, the bot preloads events from the recorder and reconstructs per-user history.
 - **Config**: Added `LOG_FILE_PATH` env var to configure the path for JSONL log file.
+- **Admin Approval Flow**: Added `ADMIN_USER` env var. Unauthorized user requests are sent to the admin with inline buttons "разрешить"/"запретить".
+- **Allowlist Storage**: Introduced `auth.Repository` abstraction and file-based JSON allowlist (`ALLOWLIST_FILE_PATH`, default `data/allowlist.json`) storing `{id, username}`; approvals/denials update file and in-memory state.

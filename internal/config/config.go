@@ -16,6 +16,7 @@ const (
 type Config struct {
 	TelegramBotToken string  `env:"TELEGRAM_BOT_TOKEN,required"`
 	AllowedUsers     []int64 `env:"ALLOWED_USERS" envSeparator:":"`
+	AdminUserID      int64   `env:"ADMIN_USER"`
 
 	// LLM settings
 	LLMProvider      LLMProvider `env:"LLM_PROVIDER" envDefault:"openai"`
@@ -29,7 +30,8 @@ type Config struct {
 	SystemPromptPath string `env:"SYSTEM_PROMPT_PATH" envDefault:"prompts/system_prompt.txt"`
 
 	// Storage
-	LogFilePath string `env:"LOG_FILE_PATH" envDefault:"logs/log.jsonl"`
+	LogFilePath       string `env:"LOG_FILE_PATH" envDefault:"logs/log.jsonl"`
+	AllowlistFilePath string `env:"ALLOWLIST_FILE_PATH" envDefault:"data/allowlist.json"`
 }
 
 func New() *Config {

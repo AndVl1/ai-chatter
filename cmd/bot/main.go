@@ -23,7 +23,20 @@ func main() {
 
 	cfg := config.New()
 
-	authSvc := auth.New(cfg.AllowedUsers)
+	var allowRepo auth.Repository
+	if cfg.AllowlistFilePath != "" {
+		repo, err := auth.NewFileRepository(cfg.AllowlistFilePath)
+		if err != nil {
+			log.Printf("failed to init allowlist repo: %v", err)
+		} else {
+			allowRepo = repo
+		}
+	}
+
+	authSvc, err := auth.NewWithRepo(allowRepo, cfg.AllowedUsers)
+	if err != nil {
+		log.Fatalf("failed to init auth: %v", err)
+	}
 
 	llmClient, err := newLLMClient(cfg)
 	if err != nil {
@@ -42,7 +55,7 @@ func main() {
 		}
 	}
 
-	bot, err := telegram.New(cfg.TelegramBotToken, authSvc, llmClient, systemPrompt, rec)
+	bot, err := telegram.New(cfg.TelegramBotToken, authSvc, llmClient, systemPrompt, rec, cfg.AdminUserID)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)
 	}
