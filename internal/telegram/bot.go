@@ -13,6 +13,7 @@ import (
 )
 
 const resetCmd = "reset_ctx"
+const summaryCmd = "summary_ctx"
 
 type Bot struct {
 	api          *tgbotapi.BotAPI
@@ -48,7 +49,7 @@ func (b *Bot) Start(ctx context.Context) {
 			continue
 		}
 		if update.CallbackQuery != nil {
-			b.handleCallback(update.CallbackQuery)
+			b.handleCallback(ctx, update.CallbackQuery)
 			continue
 		}
 	}
@@ -89,29 +90,65 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 	meta := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
 	final := meta + "\n\n" + resp.Content
 
-	// Reply with inline button to reset context
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("Сбросить контекст", resetCmd),
-		),
-	)
-
 	msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
-	msgOut.ReplyMarkup = kb
+	msgOut.ReplyMarkup = b.menuKeyboard()
 	if _, err := b.api.Send(msgOut); err != nil {
 		log.Printf("failed to send message: %v", err)
 	}
 }
 
-func (b *Bot) handleCallback(cb *tgbotapi.CallbackQuery) {
-	if cb.Data == resetCmd {
+func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
+	switch cb.Data {
+	case resetCmd:
 		b.history.Reset(cb.From.ID)
-		edit := tgbotapi.NewMessage(cb.Message.Chat.ID, "Контекст сброшен")
-		if _, err := b.api.Send(edit); err != nil {
+		if _, err := b.api.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Контекст сброшен")); err != nil {
 			log.Printf("failed to send reset confirmation: %v", err)
 		}
-		return
+	case summaryCmd:
+		// Build summary request over user's history
+		h := b.history.Get(cb.From.ID)
+		if len(h) == 0 {
+			if _, err := b.api.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "История пуста")); err != nil {
+				log.Printf("failed to send empty history notice: %v", err)
+			}
+			return
+		}
+		var msgs []llm.Message
+		msgs = append(msgs, llm.Message{Role: "system", Content: "Суммируй переписку пользователя с ассистентом. Дай краткое саммари с ключевыми темами, выводами и нерешёнными вопросами. Не выдумывай факты."})
+		msgs = append(msgs, h...)
+
+		resp, err := b.llmClient.Generate(ctx, msgs)
+		if err != nil {
+			log.Printf("failed to generate summary: %v", err)
+			if _, err := b.api.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Не удалось собрать саммари")); err != nil {
+				log.Printf("failed to send summary error: %v", err)
+			}
+			return
+		}
+
+		// Log and store summary in history
+		log.Printf("Summary [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q",
+			resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
+		b.history.AppendUser(cb.From.ID, "[команда] история")
+		b.history.AppendAssistant(cb.From.ID, resp.Content)
+
+		meta := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
+		final := meta + "\n\n" + resp.Content
+		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, final)
+		msg.ReplyMarkup = b.menuKeyboard()
+		if _, err := b.api.Send(msg); err != nil {
+			log.Printf("failed to send summary: %v", err)
+		}
 	}
+}
+
+func (b *Bot) menuKeyboard() tgbotapi.InlineKeyboardMarkup {
+	return tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("Сбросить контекст", resetCmd),
+			tgbotapi.NewInlineKeyboardButtonData("История", summaryCmd),
+		),
+	)
 }
 
 func (b *Bot) sendMessage(chatID int64, text string) {

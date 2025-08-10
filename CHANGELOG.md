@@ -23,3 +23,4 @@ All notable changes to this project will be documented in this file.
 - **Per-user Conversation History**: Implemented a thread-safe history manager; the context is isolated per user and included in LLM requests.
 - **Reset Context Button**: Added an inline button "Сбросить контекст" in Telegram; clears only the requesting user's history.
 - **LLM Context Refactor**: Refactored `llm.Client` interface to `Generate(ctx, []llm.Message)` and updated OpenAI/YaGPT clients to accept full message history.
+- **History Summary**: Added an inline button "История" to request a summary of the user's conversation with the assistant; the summary is logged, sent to the user (with meta line), and appended back to the user's history.
