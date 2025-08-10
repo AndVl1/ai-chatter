@@ -34,9 +34,22 @@ type Bot struct {
 	pending      map[int64]auth.User
 	pendingRepo  pending.Repository
 	parseMode    string
+	provider     string
+	model        string
 }
 
-func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPrompt string, rec storage.Recorder, adminUserID int64, pendingRepo pending.Repository, parseMode string) (*Bot, error) {
+func New(
+	botToken string,
+	authSvc *auth.Service,
+	llmClient llm.Client,
+	systemPrompt string,
+	rec storage.Recorder,
+	adminUserID int64,
+	pendingRepo pending.Repository,
+	parseMode string,
+	provider string,
+	model string,
+) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		return nil, err
@@ -53,6 +66,8 @@ func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPro
 		pending:      make(map[int64]auth.User),
 		pendingRepo:  pendingRepo,
 		parseMode:    parseMode,
+		provider:     provider,
+		model:        model,
 	}
 	// Preload history from recorder
 	if rec != nil {
@@ -84,6 +99,12 @@ func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPro
 func (b *Bot) Start(ctx context.Context) {
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
+
+	log.Printf("Bot started")
+	if b.adminUserID != 0 {
+		info := fmt.Sprintf("Бот запущен и готов к работе. Провайдер: %s, модель: %s.", b.provider, b.model)
+		b.sendMessage(b.adminUserID, info)
+	}
 
 	updates := b.api.GetUpdatesChan(u)
 

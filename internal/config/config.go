@@ -26,6 +26,10 @@ type Config struct {
 	YandexOAuthToken string      `env:"YANDEX_OAUTH_TOKEN"`
 	YandexFolderID   string      `env:"YANDEX_FOLDER_ID"`
 
+	// OpenRouter (optional)
+	OpenRouterReferrer string `env:"OPENROUTER_REFERRER"`
+	OpenRouterTitle    string `env:"OPENROUTER_TITLE"`
+
 	// Prompts
 	SystemPromptPath string `env:"SYSTEM_PROMPT_PATH" envDefault:"prompts/system_prompt.txt"`
 
@@ -35,7 +39,7 @@ type Config struct {
 	PendingFilePath   string `env:"PENDING_FILE_PATH" envDefault:"data/pending.json"`
 
 	// Formatting
-	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"Markdown"`
+	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"HTML"`
 }
 
 func New() *Config {

@@ -75,6 +75,8 @@ func main() {
 		cfg.AdminUserID,
 		pRepo,
 		cfg.MessageParseMode,
+		string(cfg.LLMProvider),
+		cfg.OpenAIModel,
 	)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)
@@ -98,7 +100,7 @@ func readSystemPrompt(path string) string {
 func newLLMClient(cfg *config.Config) (llm.Client, error) {
 	switch cfg.LLMProvider {
 	case config.ProviderOpenAI:
-		return llm.NewOpenAI(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, cfg.OpenAIModel), nil
+		return llm.NewOpenAI(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, cfg.OpenAIModel, cfg.OpenRouterReferrer, cfg.OpenRouterTitle), nil
 	case config.ProviderYandex:
 		return llm.NewYandex(cfg.YandexOAuthToken, cfg.YandexFolderID)
 	default:

@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/sashabaranov/go-openai"
 )
@@ -12,10 +13,38 @@ type OpenAIClient struct {
 	model  string
 }
 
-func NewOpenAI(apiKey, baseURL, model string) *OpenAIClient {
+type headerTransport struct {
+	rt      http.RoundTripper
+	headers http.Header
+}
+
+func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Clone request to avoid mutating the original
+	cl := req.Clone(req.Context())
+	for k, vs := range t.headers {
+		for _, v := range vs {
+			cl.Header.Add(k, v)
+		}
+	}
+	return t.rt.RoundTrip(cl)
+}
+
+func NewOpenAI(apiKey, baseURL, model string, referrer, title string) *OpenAIClient {
 	config := openai.DefaultConfig(apiKey)
 	if baseURL != "" {
 		config.BaseURL = baseURL
+	}
+	// Inject optional headers (useful for OpenRouter)
+	if referrer != "" || title != "" {
+		h := http.Header{}
+		if referrer != "" {
+			h.Set("HTTP-Referer", referrer)
+		}
+		if title != "" {
+			h.Set("X-Title", title)
+		}
+		base := http.DefaultTransport
+		config.HTTPClient = &http.Client{Transport: headerTransport{rt: base, headers: h}}
 	}
 	return &OpenAIClient{
 		client: openai.NewClientWithConfig(config),

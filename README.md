@@ -5,7 +5,7 @@
 Небольшой телеграм-бот на Go, который отправляет сообщения в OpenAI-совместимые API или YaGPT и возвращает ответы модели. Доступ ограничен белым списком пользователей.
 
 ## Возможности
-- Поддержка провайдеров: OpenAI и YandexGPT (YaGPT)
+- Поддержка провайдеров: OpenAI, OpenRouter (OpenAI-совместимый), YandexGPT (YaGPT)
 - Переключение провайдера через переменные окружения
 - Кастомный системный промпт из файла
 - Логирование входящих сообщений и ответов LLM (модель и токены)
@@ -39,11 +39,15 @@ PENDING_FILE_PATH=data/pending.json
 
 # OpenAI (или совместимый API)
 OPENAI_API_KEY=sk-...
+# Необязательно: переопределить конечную точку
 OPENAI_BASE_URL=
+# Необязательно: имя модели
 OPENAI_MODEL=gpt-3.5-turbo
 
 # YandexGPT (YaGPT)
+# OAuth-токен пользователя Яндекс (используется для получения IAM-токена)
 YANDEX_OAUTH_TOKEN=ya_oauth_...
+# Идентификатор каталога (folder id) в Yandex Cloud
 YANDEX_FOLDER_ID=b1g...id
 
 # Системный промпт
@@ -56,9 +60,22 @@ LOG_FILE_PATH=logs/log.jsonl
 MESSAGE_PARSE_MODE=Markdown
 ```
 
+### Использование OpenRouter
+OpenRouter совместим с OpenAI API. Настройте переменные окружения:
+```dotenv
+LLM_PROVIDER=openai
+OPENAI_API_KEY=sk-or-...            # API ключ OpenRouter
+OPENAI_BASE_URL=https://openrouter.ai/api/v1
+# опционально, заголовки для атрибуции (см. их док-у):
+OPENROUTER_REFERRER=https://github.com/AndVl1/ai-chatter
+OPENROUTER_TITLE=ai-chatter-bot
+# выберите модель из каталога OpenRouter, например:
+OPENAI_MODEL=anthropic/claude-3.5-sonnet:beta
+```
 Замечания:
-- Для OpenAI-совместимых сервисов можно указать `OPENAI_BASE_URL` и `OPENAI_MODEL`.
-- Для YaGPT используются `YANDEX_OAUTH_TOKEN` (чтобы получить IAM-токен) и `YANDEX_FOLDER_ID`.
+- `OPENAI_BASE_URL` обязателен для OpenRouter.
+- `OPENROUTER_REFERRER` и `OPENROUTER_TITLE` передаются в заголовках `HTTP-Referer` и `X-Title`.
+- Список моделей смотрите в каталоге OpenRouter; указывайте точное имя модели.
 
 ## Поведение бота
 - Если пользователь не в белом списке `ALLOWED_USERS`, бот ответит: «запрос отправлен на проверку», а в лог попадут его ID и username.

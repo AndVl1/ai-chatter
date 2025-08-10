@@ -34,3 +34,7 @@ All notable changes to this project will be documented in this file.
 - **Pending Storage**: Added file-based pending repository (`PENDING_FILE_PATH`, default `data/pending.json`) to persist pending access requests across restarts.
 - **Admin Pending Commands**: Added `/pending` to list pending users and `/approve <user_id>`, `/deny <user_id>` to allow/deny; updates pending file and allowlist on the fly.
 - **Pending UX**: If a user has already requested access, bot no longer spams admin and informs the user to wait for approval.
+- **Markdown Formatting**: Added `MESSAGE_PARSE_MODE` env var. All outgoing messages support Markdown/MarkdownV2/HTML parse modes.
+- **CI**: Added GitHub Actions workflow to build and run tests on pushes/PRs to `main` and `develop`.
+- **Unit Tests**: Added tests for history, storage, auth, pending, and basic telegram logic with mocks.
+- **OpenRouter Support**: Added optional OpenRouter headers (`OPENROUTER_REFERRER`, `OPENROUTER_TITLE`) and README instructions; set `OPENAI_BASE_URL=https://openrouter.ai/api/v1` and supply OpenRouter model names.
