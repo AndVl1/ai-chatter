@@ -24,6 +24,7 @@ const denyPrefix = "deny:"
 
 type Bot struct {
 	api          *tgbotapi.BotAPI
+	s            sender
 	authSvc      *auth.Service
 	systemPrompt string
 	llmClient    llm.Client
@@ -32,15 +33,17 @@ type Bot struct {
 	adminUserID  int64
 	pending      map[int64]auth.User
 	pendingRepo  pending.Repository
+	parseMode    string
 }
 
-func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPrompt string, rec storage.Recorder, adminUserID int64, pendingRepo pending.Repository) (*Bot, error) {
+func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPrompt string, rec storage.Recorder, adminUserID int64, pendingRepo pending.Repository, parseMode string) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		return nil, err
 	}
 	b := &Bot{
 		api:          api,
+		s:            botAPISender{api: api},
 		authSvc:      authSvc,
 		llmClient:    llmClient,
 		systemPrompt: systemPrompt,
@@ -49,6 +52,7 @@ func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPro
 		adminUserID:  adminUserID,
 		pending:      make(map[int64]auth.User),
 		pendingRepo:  pendingRepo,
+		parseMode:    parseMode,
 	}
 	// Preload history from recorder
 	if rec != nil {
@@ -247,7 +251,7 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 
 	msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
 	msgOut.ReplyMarkup = b.menuKeyboard()
-	if _, err := b.api.Send(msgOut); err != nil {
+	if _, err := b.s.Send(msgOut); err != nil {
 		log.Printf("failed to send message: %v", err)
 	}
 }
@@ -265,7 +269,7 @@ func (b *Bot) notifyAdminRequest(userID int64, username string) {
 	)
 	msg := tgbotapi.NewMessage(b.adminUserID, text)
 	msg.ReplyMarkup = kb
-	if _, err := b.api.Send(msg); err != nil {
+	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to notify admin: %v", err)
 	}
 }
@@ -274,7 +278,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	switch {
 	case cb.Data == resetCmd:
 		b.history.Reset(cb.From.ID)
-		if _, err := b.api.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Контекст сброшен")); err != nil {
+		if _, err := b.s.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Контекст сброшен")); err != nil {
 			log.Printf("failed to send reset confirmation: %v", err)
 		}
 	case cb.Data == summaryCmd:
@@ -289,7 +293,7 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	h := b.history.Get(cb.From.ID)
 	if len(h) == 0 {
-		if _, err := b.api.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "История пуста")); err != nil {
+		if _, err := b.s.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "История пуста")); err != nil {
 			log.Printf("failed to send empty history notice: %v", err)
 		}
 		return
@@ -301,7 +305,7 @@ func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	resp, err := b.llmClient.Generate(ctx, msgs)
 	if err != nil {
 		log.Printf("failed to generate summary: %v", err)
-		if _, err := b.api.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Не удалось собрать саммари")); err != nil {
+		if _, err := b.s.Send(tgbotapi.NewMessage(cb.Message.Chat.ID, "Не удалось собрать саммари")); err != nil {
 			log.Printf("failed to send summary error: %v", err)
 		}
 		return
@@ -320,7 +324,7 @@ func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	final := meta + "\n\n" + resp.Content
 	msg := tgbotapi.NewMessage(cb.Message.Chat.ID, final)
 	msg.ReplyMarkup = b.menuKeyboard()
-	if _, err := b.api.Send(msg); err != nil {
+	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to send summary: %v", err)
 	}
 }
@@ -352,10 +356,10 @@ func (b *Bot) approveUser(userID int64, notifyChatID int64) {
 	if b.pendingRepo != nil {
 		_ = b.pendingRepo.Remove(userID)
 	}
-	if _, err := b.api.Send(tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователь %d разрешен", userID))); err != nil {
+	if _, err := b.s.Send(tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователь %d разрешен", userID))); err != nil {
 		log.Printf("failed to notify approval: %v", err)
 	}
-	if _, err := b.api.Send(tgbotapi.NewMessage(userID, "Доступ к боту разрешён. Можете пользоваться.")); err != nil {
+	if _, err := b.s.Send(tgbotapi.NewMessage(userID, "Доступ к боту разрешён. Можете пользоваться.")); err != nil {
 		log.Printf("failed to notify user approval: %v", err)
 	}
 }
@@ -366,7 +370,7 @@ func (b *Bot) denyUser(userID int64, notifyChatID int64) {
 	if b.pendingRepo != nil {
 		_ = b.pendingRepo.Remove(userID)
 	}
-	if _, err := b.api.Send(tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователю %d отказано", userID))); err != nil {
+	if _, err := b.s.Send(tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователю %d отказано", userID))); err != nil {
 		log.Printf("failed to notify denial: %v", err)
 	}
 }
@@ -382,7 +386,10 @@ func (b *Bot) menuKeyboard() tgbotapi.InlineKeyboardMarkup {
 
 func (b *Bot) sendMessage(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, text)
-	if _, err := b.api.Send(msg); err != nil {
+	if b.parseMode != "" {
+		msg.ParseMode = b.parseMode
+	}
+	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to send message: %v", err)
 	}
 }

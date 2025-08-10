@@ -33,6 +33,9 @@ type Config struct {
 	LogFilePath       string `env:"LOG_FILE_PATH" envDefault:"logs/log.jsonl"`
 	AllowlistFilePath string `env:"ALLOWLIST_FILE_PATH" envDefault:"data/allowlist.json"`
 	PendingFilePath   string `env:"PENDING_FILE_PATH" envDefault:"data/pending.json"`
+
+	// Formatting
+	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"Markdown"`
 }
 
 func New() *Config {

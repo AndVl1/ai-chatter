@@ -66,7 +66,16 @@ func main() {
 		}
 	}
 
-	bot, err := telegram.New(cfg.TelegramBotToken, authSvc, llmClient, systemPrompt, rec, cfg.AdminUserID, pRepo)
+	bot, err := telegram.New(
+		cfg.TelegramBotToken,
+		authSvc,
+		llmClient,
+		systemPrompt,
+		rec,
+		cfg.AdminUserID,
+		pRepo,
+		cfg.MessageParseMode,
+	)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)
 	}

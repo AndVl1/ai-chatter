@@ -1,5 +1,7 @@
 # ai-chatter — Telegram-бот для работы с LLM (OpenAI/YandexGPT)
 
+[![CI](https://github.com/AndVl1/ai-chatter/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/AndVl1/ai-chatter/actions/workflows/ci.yml)
+
 Небольшой телеграм-бот на Go, который отправляет сообщения в OpenAI-совместимые API или YaGPT и возвращает ответы модели. Доступ ограничен белым списком пользователей.
 
 ## Возможности
@@ -31,22 +33,27 @@ LLM_PROVIDER=openai
 TELEGRAM_BOT_TOKEN=xxx
 # Список разрешённых пользователей (ID через двоеточие)
 ALLOWED_USERS=123456789:987654321
+ADMIN_USER=000000000
+ALLOWLIST_FILE_PATH=data/allowlist.json
+PENDING_FILE_PATH=data/pending.json
 
 # OpenAI (или совместимый API)
 OPENAI_API_KEY=sk-...
-# Необязательно: переопределить конечную точку
 OPENAI_BASE_URL=
-# Необязательно: имя модели
 OPENAI_MODEL=gpt-3.5-turbo
 
 # YandexGPT (YaGPT)
-# OAuth-токен пользователя Яндекс (используется для получения IAM-токена)
 YANDEX_OAUTH_TOKEN=ya_oauth_...
-# Идентификатор каталога (folder id) в Yandex Cloud
 YANDEX_FOLDER_ID=b1g...id
 
-# Системный промпт (путь к файлу)
+# Системный промпт
 SYSTEM_PROMPT_PATH=prompts/system_prompt.txt
+
+# Логи JSONL
+LOG_FILE_PATH=logs/log.jsonl
+
+# Форматирование сообщений
+MESSAGE_PARSE_MODE=Markdown
 ```
 
 Замечания:
