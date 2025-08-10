@@ -19,4 +19,7 @@ All notable changes to this project will be documented in this file.
 - **.env Loading**: Improved `.env` loading to search multiple common locations (`.env`, `../.env`, `cmd/bot/.env`).
 - **System Prompt**: Added `SYSTEM_PROMPT_PATH` and support for a system prompt file; passed to both OpenAI and YaGPT clients.
 - **Logging**: Added logging of incoming user messages and LLM responses (model name and token usage).
-- **Docs**: Added `README.md` with usage instructions and environment setup.
+- **Response Meta Line**: Bot prepends each answer with `[model=..., tokens: prompt=..., completion=..., total=...]`.
+- **Per-user Conversation History**: Implemented a thread-safe history manager; the context is isolated per user and included in LLM requests.
+- **Reset Context Button**: Added an inline button "Сбросить контекст" in Telegram; clears only the requesting user's history.
+- **LLM Context Refactor**: Refactored `llm.Client` interface to `Generate(ctx, []llm.Message)` and updated OpenAI/YaGPT clients to accept full message history.
