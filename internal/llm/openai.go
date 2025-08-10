@@ -23,24 +23,17 @@ func NewOpenAI(apiKey, baseURL, model string) *OpenAIClient {
 	}
 }
 
-func (c *OpenAIClient) GenerateText(ctx context.Context, systemPrompt string, prompt string) (Response, error) {
-	messages := []openai.ChatCompletionMessage{}
-	if systemPrompt != "" {
-		messages = append(messages, openai.ChatCompletionMessage{
-			Role:    openai.ChatMessageRoleSystem,
-			Content: systemPrompt,
-		})
+func (c *OpenAIClient) Generate(ctx context.Context, messages []Message) (Response, error) {
+	var oaMsgs []openai.ChatCompletionMessage
+	for _, m := range messages {
+		oaMsgs = append(oaMsgs, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
 	}
-	messages = append(messages, openai.ChatCompletionMessage{
-		Role:    openai.ChatMessageRoleUser,
-		Content: prompt,
-	})
 
 	resp, err := c.client.CreateChatCompletion(
 		ctx,
 		openai.ChatCompletionRequest{
 			Model:    c.model,
-			Messages: messages,
+			Messages: oaMsgs,
 		},
 	)
 	if err != nil {

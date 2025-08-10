@@ -35,14 +35,13 @@ func NewYandex(oauthToken, folderID string) (*YandexClient, error) {
 	}, nil
 }
 
-func (c *YandexClient) GenerateText(ctx context.Context, systemPrompt string, prompt string) (Response, error) {
-	var messages []yagpt.Message
-	if systemPrompt != "" {
-		messages = append(messages, yagpt.Message{Role: "system", Content: systemPrompt})
+func (c *YandexClient) Generate(ctx context.Context, messages []Message) (Response, error) {
+	var yaMsgs []yagpt.Message
+	for _, m := range messages {
+		yaMsgs = append(yaMsgs, yagpt.Message{Role: m.Role, Content: m.Content})
 	}
-	messages = append(messages, yagpt.Message{Role: "user", Content: prompt})
 
-	resp, err := c.ya.CompletionWithCtx(ctx, c.iamToken, messages)
+	resp, err := c.ya.CompletionWithCtx(ctx, c.iamToken, yaMsgs)
 	if err != nil {
 		return Response{}, fmt.Errorf("yagpt completion failed: %w", err)
 	}

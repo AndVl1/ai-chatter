@@ -2,6 +2,11 @@ package llm
 
 import "context"
 
+type Message struct {
+	Role    string
+	Content string
+}
+
 type Response struct {
 	Content          string
 	Model            string
@@ -11,5 +16,5 @@ type Response struct {
 }
 
 type Client interface {
-	GenerateText(ctx context.Context, systemPrompt string, prompt string) (Response, error)
+	Generate(ctx context.Context, messages []Message) (Response, error)
 }
