@@ -11,6 +11,7 @@ import (
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/config"
 	"ai-chatter/internal/llm"
+	"ai-chatter/internal/storage"
 	"ai-chatter/internal/telegram"
 )
 
@@ -31,7 +32,17 @@ func main() {
 
 	systemPrompt := readSystemPrompt(cfg.SystemPromptPath)
 
-	bot, err := telegram.New(cfg.TelegramBotToken, authSvc, llmClient, systemPrompt)
+	var rec storage.Recorder
+	if cfg.LogFilePath != "" {
+		fr, err := storage.NewFileRecorder(cfg.LogFilePath)
+		if err != nil {
+			log.Printf("failed to init file recorder: %v", err)
+		} else {
+			rec = fr
+		}
+	}
+
+	bot, err := telegram.New(cfg.TelegramBotToken, authSvc, llmClient, systemPrompt, rec)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)
 	}

@@ -24,3 +24,7 @@ All notable changes to this project will be documented in this file.
 - **Reset Context Button**: Added an inline button "Сбросить контекст" in Telegram; clears only the requesting user's history.
 - **LLM Context Refactor**: Refactored `llm.Client` interface to `Generate(ctx, []llm.Message)` and updated OpenAI/YaGPT clients to accept full message history.
 - **History Summary**: Added an inline button "История" to request a summary of the user's conversation with the assistant; the summary is logged, sent to the user (with meta line), and appended back to the user's history.
+- **Storage Abstraction**: Introduced `storage.Recorder` and `storage.Event` for pluggable persistence.
+- **File Logger (JSONL)**: Implemented file-based recorder writing one JSON per line to `LOG_FILE_PATH` (default `logs/log.jsonl`).
+- **History Restore**: On startup, the bot preloads events from the recorder and reconstructs per-user history.
+- **Config**: Added `LOG_FILE_PATH` env var to configure the path for JSONL log file.

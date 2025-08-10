@@ -18,15 +18,18 @@ type Config struct {
 	AllowedUsers     []int64 `env:"ALLOWED_USERS" envSeparator:":"`
 
 	// LLM settings
-	LLMProvider     LLMProvider `env:"LLM_PROVIDER" envDefault:"openai"`
-	OpenAIAPIKey    string      `env:"OPENAI_API_KEY"`
-	OpenAIBaseURL   string      `env:"OPENAI_BASE_URL"`
-	OpenAIModel     string      `env:"OPENAI_MODEL" envDefault:"gpt-3.5-turbo"`
-	YandexOAuthToken string     `env:"YANDEX_OAUTH_TOKEN"`
-	YandexFolderID   string     `env:"YANDEX_FOLDER_ID"`
+	LLMProvider      LLMProvider `env:"LLM_PROVIDER" envDefault:"openai"`
+	OpenAIAPIKey     string      `env:"OPENAI_API_KEY"`
+	OpenAIBaseURL    string      `env:"OPENAI_BASE_URL"`
+	OpenAIModel      string      `env:"OPENAI_MODEL" envDefault:"gpt-3.5-turbo"`
+	YandexOAuthToken string      `env:"YANDEX_OAUTH_TOKEN"`
+	YandexFolderID   string      `env:"YANDEX_FOLDER_ID"`
 
 	// Prompts
 	SystemPromptPath string `env:"SYSTEM_PROMPT_PATH" envDefault:"prompts/system_prompt.txt"`
+
+	// Storage
+	LogFilePath string `env:"LOG_FILE_PATH" envDefault:"logs/log.jsonl"`
 }
 
 func New() *Config {

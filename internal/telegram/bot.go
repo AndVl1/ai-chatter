@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/history"
 	"ai-chatter/internal/llm"
+	"ai-chatter/internal/storage"
 )
 
 const resetCmd = "reset_ctx"
@@ -21,20 +23,39 @@ type Bot struct {
 	llmClient    llm.Client
 	systemPrompt string
 	history      *history.Manager
+	recorder     storage.Recorder
 }
 
-func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPrompt string) (*Bot, error) {
+func New(botToken string, authSvc *auth.Service, llmClient llm.Client, systemPrompt string, rec storage.Recorder) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		return nil, err
 	}
-	return &Bot{
+	b := &Bot{
 		api:          api,
 		authSvc:      authSvc,
 		llmClient:    llmClient,
 		systemPrompt: systemPrompt,
 		history:      history.NewManager(),
-	}, nil
+		recorder:     rec,
+	}
+	// Preload history from recorder
+	if rec != nil {
+		if events, err := rec.LoadInteractions(); err == nil {
+			for _, ev := range events {
+				if ev.UserID == 0 {
+					continue
+				}
+				if ev.UserMessage != "" {
+					b.history.AppendUser(ev.UserID, ev.UserMessage)
+				}
+				if ev.AssistantResponse != "" {
+					b.history.AppendAssistant(ev.UserID, ev.AssistantResponse)
+				}
+			}
+		}
+	}
+	return b, nil
 }
 
 func (b *Bot) Start(ctx context.Context) {
@@ -64,8 +85,16 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 
 	log.Printf("Incoming message from %d (@%s): %q", msg.From.ID, msg.From.UserName, msg.Text)
 
-	// Update history
+	// Update history and record
 	b.history.AppendUser(msg.From.ID, msg.Text)
+	if b.recorder != nil {
+		_ = b.recorder.AppendInteraction(storage.Event{
+			Timestamp:         time.Now().UTC(),
+			UserID:            msg.From.ID,
+			UserMessage:       msg.Text,
+			AssistantResponse: "",
+		})
+	}
 
 	// Build context: system + history
 	var contextMsgs []llm.Message
@@ -81,8 +110,16 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 		return
 	}
 
-	// Save assistant response into history
+	// Save assistant response into history and record
 	b.history.AppendAssistant(msg.From.ID, resp.Content)
+	if b.recorder != nil {
+		_ = b.recorder.AppendInteraction(storage.Event{
+			Timestamp:         time.Now().UTC(),
+			UserID:            msg.From.ID,
+			UserMessage:       "",
+			AssistantResponse: resp.Content,
+		})
+	}
 
 	log.Printf("LLM response [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q",
 		resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
@@ -126,11 +163,15 @@ func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 			return
 		}
 
-		// Log and store summary in history
+		// Log and store summary in history and recorder
 		log.Printf("Summary [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q",
 			resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
 		b.history.AppendUser(cb.From.ID, "[команда] история")
 		b.history.AppendAssistant(cb.From.ID, resp.Content)
+		if b.recorder != nil {
+			_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: cb.From.ID, UserMessage: "[команда] история", AssistantResponse: ""})
+			_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: cb.From.ID, UserMessage: "", AssistantResponse: resp.Content})
+		}
 
 		meta := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
 		final := meta + "\n\n" + resp.Content
