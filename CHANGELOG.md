@@ -34,7 +34,13 @@ All notable changes to this project will be documented in this file.
 - **Pending Storage**: Added file-based pending repository (`PENDING_FILE_PATH`, default `data/pending.json`) to persist pending access requests across restarts.
 - **Admin Pending Commands**: Added `/pending` to list pending users and `/approve <user_id>`, `/deny <user_id>` to allow/deny; updates pending file and allowlist on the fly.
 - **Pending UX**: If a user has already requested access, bot no longer spams admin and informs the user to wait for approval.
-- **Markdown Formatting**: Added `MESSAGE_PARSE_MODE` env var. All outgoing messages support Markdown/MarkdownV2/HTML parse modes.
+- **Markdown Formatting**: Added `MESSAGE_PARSE_MODE` env var (now default `HTML`). All outgoing messages support HTML/Markdown/MarkdownV2.
 - **CI**: Added GitHub Actions workflow to build and run tests on pushes/PRs to `main` and `develop`.
-- **Unit Tests**: Added tests for history, storage, auth, pending, and basic telegram logic with mocks.
+- **Unit Tests**: Added tests for history, storage, auth, pending, and telegram logic (including JSON parsing of LLM responses).
 - **OpenRouter Support**: Added optional OpenRouter headers (`OPENROUTER_REFERRER`, `OPENROUTER_TITLE`) and README instructions; set `OPENAI_BASE_URL=https://openrouter.ai/api/v1` and supply OpenRouter model names.
+- **Admin Provider/Model Hot-Reload**: Added `/provider <openai|yandex>` and `/model <openai/gpt-5-nano|openai/gpt-oss-20b:free|qwen/qwen3-coder>`; selections persisted in `data/provider.txt` and `data/model.txt` and applied without restart.
+- **Startup Notice**: On bot start, logs "Bot started" and sends admin a message with current provider and model.
+- **JSON Output Contract**: System prompt now enforces a JSON response structure `{title, answer, meta}` without markdown fences; bot parses it, sends only title+answer to the user, and stores `meta` for context.
+- **Flexible `meta` Parsing**: `meta` can be a string or a JSON object/array; objects are compacted to a single-line JSON string for storage/context.
+- **Context Flags**: History entries now track `isUsedInContext`. Reset marks all user entries as unused (kept in history).
+- **Persistent `can_use`**: JSONL events include optional `can_use` flag; on reset the bot rewrites the log setting `can_use=false` for the user, so context state survives restarts.

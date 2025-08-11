@@ -2,7 +2,9 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"os"
 	"strconv"
@@ -98,11 +100,15 @@ func New(
 				if ev.UserID == 0 {
 					continue
 				}
+				used := true
+				if ev.CanUse != nil {
+					used = *ev.CanUse
+				}
 				if ev.UserMessage != "" {
-					b.history.AppendUser(ev.UserID, ev.UserMessage)
+					b.history.AppendUserWithUsed(ev.UserID, ev.UserMessage, used)
 				}
 				if ev.AssistantResponse != "" {
-					b.history.AppendAssistant(ev.UserID, ev.AssistantResponse)
+					b.history.AppendAssistantWithUsed(ev.UserID, ev.AssistantResponse, used)
 				}
 			}
 		}
@@ -352,6 +358,70 @@ func (b *Bot) handleAdminConfigCommands(msg *tgbotapi.Message) {
 	}
 }
 
+type llmJSON struct {
+	Title  string `json:"title"`
+	Answer string `json:"answer"`
+	Meta   string `json:"meta"`
+}
+
+type llmJSONFlexible struct {
+	Title  string          `json:"title"`
+	Answer string          `json:"answer"`
+	Meta   json.RawMessage `json:"meta"`
+}
+
+func compactJSON(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return "", false
+	}
+	// If it is a JSON string already, unmarshal into string
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, true
+	}
+	// Otherwise, compact the JSON object/array
+	var any interface{}
+	if err := json.Unmarshal(raw, &any); err != nil {
+		return "", false
+	}
+	b, err := json.Marshal(any)
+	if err != nil {
+		return "", false
+	}
+	return string(b), true
+}
+
+func parseLLMJSON(s string) (llmJSON, bool) {
+	// First try strict
+	var v llmJSON
+	if err := json.Unmarshal([]byte(s), &v); err == nil {
+		if v.Title != "" || v.Answer != "" || v.Meta != "" {
+			return v, true
+		}
+	}
+	// Flexible meta handling
+	var f llmJSONFlexible
+	if err := json.Unmarshal([]byte(s), &f); err != nil {
+		return llmJSON{}, false
+	}
+	metaStr, _ := compactJSON(f.Meta)
+	return llmJSON{Title: f.Title, Answer: f.Answer, Meta: metaStr}, true
+}
+
+func (b *Bot) formatTitleAnswer(title, answer string) string {
+	pm := strings.ToLower(b.parseModeValue())
+	switch pm {
+	case strings.ToLower(tgbotapi.ModeHTML):
+		// Preserve answer formatting as-is; escape only title
+		return fmt.Sprintf("<b>%s</b>\n\n%s", html.EscapeString(title), answer)
+	case strings.ToLower(tgbotapi.ModeMarkdownV2):
+		// Preserve answer; escape title
+		return fmt.Sprintf("%s\n\n%s", escapeMarkdownV2(title), answer)
+	default: // Markdown
+		return fmt.Sprintf("%s\n\n%s", title, answer)
+	}
+}
+
 func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) {
 	if !b.authSvc.IsAllowed(msg.From.ID) {
 		log.Printf("Unauthorized access attempt by user ID: %d, username: @%s", msg.From.ID, msg.From.UserName)
@@ -376,11 +446,13 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 	// Update history and record
 	b.history.AppendUser(msg.From.ID, msg.Text)
 	if b.recorder != nil {
+		tru := true
 		_ = b.recorder.AppendInteraction(storage.Event{
 			Timestamp:         time.Now().UTC(),
 			UserID:            msg.From.ID,
 			UserMessage:       msg.Text,
 			AssistantResponse: "",
+			CanUse:            &tru,
 		})
 	}
 
@@ -398,23 +470,38 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 		return
 	}
 
-	// Save assistant response into history and record
-	b.history.AppendAssistant(msg.From.ID, resp.Content)
-	if b.recorder != nil {
-		_ = b.recorder.AppendInteraction(storage.Event{
-			Timestamp:         time.Now().UTC(),
-			UserID:            msg.From.ID,
-			UserMessage:       "",
-			AssistantResponse: resp.Content,
-		})
+	// Parse JSON content
+	parsed, ok := parseLLMJSON(resp.Content)
+	titleToSend := ""
+	answerToSend := resp.Content
+	metaForContext := ""
+	if ok {
+		titleToSend = parsed.Title
+		answerToSend = parsed.Answer
+		metaForContext = parsed.Meta
 	}
 
-	log.Printf("LLM response [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q",
-		resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
+	// Save assistant meta in history and recorder
+	if metaForContext != "" {
+		b.history.AppendAssistantWithUsed(msg.From.ID, metaForContext, true)
+	} else {
+		b.history.AppendAssistantWithUsed(msg.From.ID, answerToSend, true)
+	}
+	if b.recorder != nil {
+		tru := true
+		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: msg.From.ID, AssistantResponse: metaForContext, CanUse: &tru})
+	}
 
-	meta := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
-	metaEsc := b.escapeIfNeeded(meta)
-	final := metaEsc + "\n\n" + resp.Content
+	log.Printf("LLM response [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
+
+	metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
+	metaEsc := b.escapeIfNeeded(metaLine)
+
+	body := answerToSend
+	if titleToSend != "" {
+		body = b.formatTitleAnswer(titleToSend, answerToSend)
+	}
+	final := metaEsc + "\n\n" + body
 
 	msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
 	msgOut.ReplyMarkup = b.menuKeyboard()
@@ -444,8 +531,13 @@ func (b *Bot) notifyAdminRequest(userID int64, username string) {
 func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	switch {
 	case cb.Data == resetCmd:
-		b.history.Reset(cb.From.ID)
-		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, "Контекст сброшен")
+		b.history.DisableAll(cb.From.ID)
+		if b.recorder != nil {
+			if err := b.recorder.SetAllCanUse(cb.From.ID, false); err != nil {
+				log.Printf("failed to persist can_use=false: %v", err)
+			}
+		}
+		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, b.escapeIfNeeded("Контекст сброшен"))
 		msg.ParseMode = b.parseModeValue()
 		if _, err := b.s.Send(msg); err != nil {
 			log.Printf("failed to send reset confirmation: %v", err)
@@ -483,17 +575,40 @@ func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 		return
 	}
 
-	log.Printf("Summary [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
-	b.history.AppendUser(cb.From.ID, "[команда] история")
-	b.history.AppendAssistant(cb.From.ID, resp.Content)
-	if b.recorder != nil {
-		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: cb.From.ID, UserMessage: "[команда] история", AssistantResponse: ""})
-		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: cb.From.ID, UserMessage: "", AssistantResponse: resp.Content})
+	// Parse JSON
+	parsed, ok := parseLLMJSON(resp.Content)
+	titleToSend := ""
+	answerToSend := resp.Content
+	metaForContext := ""
+	if ok {
+		titleToSend = parsed.Title
+		answerToSend = parsed.Answer
+		metaForContext = parsed.Meta
 	}
 
-	meta := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
-	metaEsc := b.escapeIfNeeded(meta)
-	final := metaEsc + "\n\n" + resp.Content
+	log.Printf("Summary [model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
+	b.history.AppendUser(cb.From.ID, "[команда] история")
+	// store meta in history (if available) else full answer
+	if metaForContext != "" {
+		b.history.AppendAssistantWithUsed(cb.From.ID, metaForContext, true)
+	} else {
+		b.history.AppendAssistantWithUsed(cb.From.ID, answerToSend, true)
+	}
+	if b.recorder != nil {
+		tru := true
+		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: cb.From.ID, UserMessage: "[команда] история", CanUse: &tru})
+		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: cb.From.ID, AssistantResponse: metaForContext, CanUse: &tru})
+	}
+
+	metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
+	metaEsc := b.escapeIfNeeded(metaLine)
+
+	body := answerToSend
+	if titleToSend != "" {
+		body = b.formatTitleAnswer(titleToSend, answerToSend)
+	}
+	final := metaEsc + "\n\n" + body
+
 	msg := tgbotapi.NewMessage(cb.Message.Chat.ID, final)
 	msg.ParseMode = b.parseModeValue()
 	msg.ReplyMarkup = b.menuKeyboard()

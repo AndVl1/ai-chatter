@@ -11,6 +11,9 @@ type Event struct {
 	UserID            int64     `json:"user_id"`
 	UserMessage       string    `json:"user_message"`
 	AssistantResponse string    `json:"assistant_response"`
+	// CanUse indicates whether this piece of content should be used in context.
+	// It is a pointer for backward compatibility with old logs (nil => treat as true).
+	CanUse *bool `json:"can_use,omitempty"`
 }
 
 // Recorder abstracts persistence of interaction events.
@@ -21,4 +24,5 @@ type Event struct {
 type Recorder interface {
 	AppendInteraction(event Event) error
 	LoadInteractions() ([]Event, error)
+	SetAllCanUse(userID int64, canUse bool) error
 }
