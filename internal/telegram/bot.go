@@ -155,10 +155,15 @@ func (b *Bot) reloadLLMClient() error {
 }
 
 func (b *Bot) escapeIfNeeded(s string) string {
-	if strings.EqualFold(b.parseMode, string(tgbotapi.ModeMarkdownV2)) {
+	pm := strings.ToLower(b.parseModeValue())
+	switch pm {
+	case strings.ToLower(tgbotapi.ModeMarkdownV2):
 		return escapeMarkdownV2(s)
+	case strings.ToLower(tgbotapi.ModeHTML):
+		return html.EscapeString(s)
+	default:
+		return s
 	}
-	return s
 }
 
 func escapeMarkdownV2(s string) string {
@@ -681,5 +686,7 @@ func (b *Bot) menuKeyboard() tgbotapi.InlineKeyboardMarkup {
 func (b *Bot) sendMessage(chatID int64, text string) {
 	msg := tgbotapi.NewMessage(chatID, b.escapeIfNeeded(text))
 	msg.ParseMode = b.parseModeValue()
-	_, _ = b.s.Send(msg)
+	if _, err := b.s.Send(msg); err != nil {
+		log.Println(err)
+	}
 }
