@@ -24,11 +24,18 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		if !b.authSvc.IsAllowed(msg.From.ID) {
 			return
 		}
+		// Reset previous context for this user (do not delete logs, just mark not used)
+		b.history.DisableAll(msg.From.ID)
+		if b.recorder != nil {
+			_ = b.recorder.SetAllCanUse(msg.From.ID, false)
+		}
+
 		topic := strings.TrimSpace(msg.CommandArguments())
 		addition := "Requirements elicitation mode (Technical Specification). Your job is to iteratively clarify and assemble a complete TS in Russian for the topic: '" + topic + "'. " +
 			"Ask up to 5 highly targeted questions per turn until you are confident the TS is complete. Focus on: scope/goals, user roles, environment, constraints (budget/time/tech), functional and non-functional requirements, data and integrations, dependencies, acceptance criteria, risks/mitigations, deliverables and plan. " +
 			"When asking questions, prefer concrete options (multiple-choice) and short free-form fields; personalize questions to the user’s previous answers (e.g., preferred and unwanted ingredients, platforms, APIs, performance targets). " +
-			"Always respond strictly in JSON {title, answer, compressed_context, status}. Set status='continue' while clarifying. When the TS is fully ready, set status='final'. If your context window is >= 80% full, include 'compressed_context' with a compact string summary of essential facts/decisions to continue without previous messages. You have at most 15 messages to clarify before finalization."
+			"Always respond strictly in JSON {title, answer, compressed_context, status}. Set status='continue' while clarifying. When the TS is fully ready, set status='final'. If your context window is >= 80% full, include 'compressed_context' with a compact string summary of essential facts/decisions to continue without previous messages. You have at most 15 messages to clarify before finalization. " +
+			"VERY IMPORTANT: Present your questions as a numbered list (1., 2., 3., ...) with each question on its own new line. Do not merge questions into a single paragraph."
 		b.addUserSystemPrompt(msg.From.ID, addition)
 		b.setTZMode(msg.From.ID, true)
 		b.setTZRemaining(msg.From.ID, tzMaxSteps)

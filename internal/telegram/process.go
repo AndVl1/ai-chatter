@@ -62,6 +62,56 @@ func parseLLMJSON(s string) (llmJSON, bool) {
 	return llmJSON{Title: f.Title, Answer: f.Answer, CompressedContext: cc, Status: f.Status}, true
 }
 
+// Auto-numbering for questions in TZ mode when status=continue
+func isNumberedLine(s string) bool {
+	ss := strings.TrimSpace(s)
+	if ss == "" {
+		return false
+	}
+	// scan leading digits
+	i := 0
+	for i < len(ss) && ss[i] >= '0' && ss[i] <= '9' {
+		i++
+	}
+	if i == 0 {
+		return false
+	}
+	if i < len(ss) && ss[i] == '.' {
+		return true
+	}
+	return false
+}
+
+func enforceNumberedListIfNeeded(answer string) string {
+	lines := strings.Split(answer, "\n")
+	var content []string
+	for _, ln := range lines {
+		l := strings.TrimSpace(ln)
+		if l != "" {
+			content = append(content, l)
+		}
+	}
+	if len(content) < 2 {
+		return answer
+	}
+	// if already has 2+ numbered lines, keep as is
+	num := 0
+	for _, l := range content {
+		if isNumberedLine(l) {
+			num++
+		}
+	}
+	if num >= 2 {
+		return answer
+	}
+	// produce numbered
+	var out []string
+	for i, l := range content {
+		out = append(out, fmt.Sprintf("%d. %s", i+1, l))
+	}
+	return strings.Join(out, "\n")
+}
+
 // reformatToSchema is defined in bot.go (single owner)
 
 // buildContextWithOverflow is defined in bot.go
@@ -90,6 +140,11 @@ func (b *Bot) processLLMAndRespond(ctx context.Context, chatID int64, userID int
 	status := ""
 	if ok {
 		status = strings.ToLower(strings.TrimSpace(parsed.Status))
+	}
+
+	// Enforce numbered list for questions while clarifying TZ
+	if b.isTZMode(userID) && status != "final" {
+		answerToSend = enforceNumberedListIfNeeded(answerToSend)
 	}
 
 	// TZ steps control in both paths
