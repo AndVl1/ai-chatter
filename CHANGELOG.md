@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [Day 1-2]
 
 ### Added
 - **Project Structure**: Initialized a Go project with a modular structure (`cmd`, `internal`).
@@ -44,3 +44,10 @@ All notable changes to this project will be documented in this file.
 - **Flexible `meta` Parsing**: `meta` can be a string or a JSON object/array; objects are compacted to a single-line JSON string for storage/context.
 - **Context Flags**: History entries now track `isUsedInContext`. Reset marks all user entries as unused (kept in history).
 - **Persistent `can_use`**: JSONL events include optional `can_use` flag; on reset the bot rewrites the log setting `can_use=false` for the user, so context state survives restarts.
+
+## [Day 3]
+- TS flow: reintroduced JSON field `status` with values `continue|final`. When `status=final` and user is in `/tz` mode, the bot decorates the answer with a "ТЗ Готово" marker and exits TZ mode.
+- LLM responses: schema simplified to `{title, answer, compressed_context, status}`; `compressed_context` is appended into per-user system prompt and disables previous history for context.
+- Logging: restored detailed logs for LLM interactions — outbound messages (purpose, roles, sizes, truncated contents) and inbound responses (model, token usage, raw content).
+- System prompt: updated to describe the new schema including `status` and the 80% context fullness rule; clarified that the model must not use formatting in its `answer`.
+- TZ mode cap: limited the clarification phase to at most 15 assistant messages. Upon reaching the cap, the bot forces finalization (requests a final TS) and returns the result with the "ТЗ Готово" marker.
