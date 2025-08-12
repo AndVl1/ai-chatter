@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -223,8 +224,7 @@ func (b *Bot) sendFinalTS(chatID, userID int64, p llmJSON, resp llm.Response) {
 }
 
 func (b *Bot) logResponse(resp llm.Response) {
-	// already logged request; here we ensure response details are printed
-	// printed elsewhere too when needed
+	log.Printf("LLM response [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
 }
 
 func (b *Bot) nowUTC() time.Time { return time.Now().UTC() }
