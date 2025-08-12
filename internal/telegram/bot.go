@@ -2,12 +2,10 @@ package telegram
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"html"
 	"log"
 	"os"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -260,200 +258,7 @@ func (b *Bot) handleStart(msg *tgbotapi.Message) {
 	b.sendMessage(msg.Chat.ID, welcome+"\n\nЗапрос на доступ отправлен администратору. Как только он подтвердит, вы получите уведомление.")
 }
 
-func (b *Bot) handleCommand(msg *tgbotapi.Message) {
-	if msg.Command() == "provider" || msg.Command() == "model" {
-		b.handleAdminConfigCommands(msg)
-		return
-	}
-	if msg.Command() == "tz" {
-		if !b.authSvc.IsAllowed(msg.From.ID) {
-			return
-		}
-		topic := strings.TrimSpace(msg.CommandArguments())
-		addition := "Requirements elicitation mode (Technical Specification). Your job is to iteratively clarify and assemble a complete TS in Russian for the topic: '" + topic + "'. " +
-			"Ask up to 5 highly targeted questions per turn until you are confident the TS is complete. Focus on: scope/goals, user roles, environment, constraints (budget/time/tech), functional and non-functional requirements, data and integrations, dependencies, acceptance criteria, risks/mitigations, deliverables and plan. " +
-			"When asking questions, prefer concrete options (multiple-choice) and short free-form fields; personalize questions to the user’s previous answers (e.g., preferred and unwanted ingredients, platforms, APIs, performance targets). " +
-			"Always respond strictly in JSON {title, answer, compressed_context, status}. Set status='continue' while clarifying. When the TS is fully ready, set status='final'. If your context window is >= 80% full, include 'compressed_context' with a compact string summary of essential facts/decisions to continue without previous messages. You have at most 15 messages to clarify before finalization."
-		b.addUserSystemPrompt(msg.From.ID, addition)
-		b.setTZMode(msg.From.ID, true)
-		b.setTZRemaining(msg.From.ID, tzMaxSteps)
-		seed := "Тема ТЗ: " + topic
-		b.history.AppendUser(msg.From.ID, seed)
-		if b.recorder != nil {
-			tru := true
-			_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: msg.From.ID, UserMessage: seed, CanUse: &tru})
-		}
-		ctx := context.Background()
-		contextMsgs := b.buildContextWithOverflow(ctx, msg.From.ID)
-		if b.isTZMode(msg.From.ID) {
-			left := b.getTZRemaining(msg.From.ID)
-			if left > 0 && left <= 2 {
-				accel := "Осталось очень мало сообщений для уточнений (<=2). Сократи количество вопросов и постарайся завершить формирование ТЗ как можно скорее. Если возможно — финализируй уже в этом ответе (status='final')."
-				contextMsgs = append([]llm.Message{{Role: "system", Content: accel}}, contextMsgs...)
-			}
-		}
-		b.logLLMRequest(msg.From.ID, "tz_bootstrap", contextMsgs)
-		resp, err := b.getLLMClient().Generate(ctx, contextMsgs)
-		if err != nil {
-			b.sendMessage(msg.Chat.ID, "Не удалось стартовать режим ТЗ, попробуйте ещё раз.")
-			log.Println(err)
-			return
-		}
-		log.Printf("LLM response [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
-		var parsed llmJSON
-		ok := false
-		if p1, ok1 := parseLLMJSON(resp.Content); ok1 {
-			parsed = p1
-			ok = true
-		} else {
-			if p2, ok2 := b.reformatToSchema(ctx, msg.From.ID, resp.Content); ok2 {
-				parsed = p2
-				ok = true
-			}
-		}
-		titleToSend := ""
-		answerToSend := resp.Content
-		status := ""
-		if ok {
-			titleToSend = parsed.Title
-			if parsed.Answer != "" {
-				answerToSend = parsed.Answer
-			}
-			if strings.TrimSpace(parsed.CompressedContext) != "" {
-				b.addUserSystemPrompt(msg.From.ID, parsed.CompressedContext)
-				b.history.DisableAll(msg.From.ID)
-			}
-			status = strings.ToLower(strings.TrimSpace(parsed.Status))
-		}
-		if b.isTZMode(msg.From.ID) && status != "final" {
-			left := b.decTZRemaining(msg.From.ID)
-			if left <= 0 {
-				if pFinal, respFinal, okFinal := b.produceFinalTS(ctx, msg.From.ID); okFinal {
-					answerToSend = pFinal.Answer
-					if pFinal.Title != "" {
-						answerToSend = b.formatTitleAnswer(pFinal.Title, pFinal.Answer)
-					}
-					status = "final"
-					// override meta line tokens with final response
-					metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", respFinal.Model, respFinal.PromptTokens, respFinal.CompletionTokens, respFinal.TotalTokens)
-					metaEsc := b.escapeIfNeeded(metaLine)
-					body := answerToSend
-					if titleToSend != "" {
-						body = b.formatTitleAnswer(titleToSend, answerToSend)
-					}
-					pm := strings.ToLower(b.parseModeValue())
-					var header string
-					switch pm {
-					case strings.ToLower(tgbotapi.ModeHTML):
-						header = "<b>ТЗ Готово</b>"
-					case strings.ToLower(tgbotapi.ModeMarkdownV2):
-						header = escapeMarkdownV2("ТЗ Готово")
-					default:
-						header = "**ТЗ Готово**"
-					}
-					body = header + "\n\n" + body
-					final := metaEsc + "\n\n" + body
-					msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
-					msgOut.ParseMode = b.parseModeValue()
-					msgOut.ReplyMarkup = b.menuKeyboard()
-					_, _ = b.s.Send(msgOut)
-					b.clearTZState(msg.From.ID)
-					return
-				}
-			}
-		}
-		// normal sending path continues below (unchanged)
-		metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
-		metaEsc := b.escapeIfNeeded(metaLine)
-		body := answerToSend
-		if titleToSend != "" {
-			body = b.formatTitleAnswer(titleToSend, answerToSend)
-		}
-		if status == "final" && b.isTZMode(msg.From.ID) {
-			pm := strings.ToLower(b.parseModeValue())
-			var header string
-			switch pm {
-			case strings.ToLower(tgbotapi.ModeHTML):
-				header = "<b>ТЗ Готово</b>"
-			case strings.ToLower(tgbotapi.ModeMarkdownV2):
-				header = escapeMarkdownV2("ТЗ Готово")
-			default:
-				header = "**ТЗ Готово**"
-			}
-			body = header + "\n\n" + body
-			b.clearTZState(msg.From.ID)
-		}
-		final := metaEsc + "\n\n" + body
-		msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
-		msgOut.ParseMode = b.parseModeValue()
-		msgOut.ReplyMarkup = b.menuKeyboard()
-		if _, err := b.s.Send(msgOut); err != nil {
-			log.Printf("failed to send tz bootstrap message: %v", err)
-		}
-		return
-	}
-	// admin-only commands...
-	if msg.From.ID != b.adminUserID {
-		b.sendMessage(msg.Chat.ID, "Команда доступна только администратору")
-		return
-	}
-	switch msg.Command() {
-	case "allowlist":
-		var bld strings.Builder
-		bld.WriteString("Allowlist:\n")
-		for _, u := range b.authSvc.List() {
-			bld.WriteString(fmt.Sprintf("- id=%d, username=@%s, name=%s %s\n", u.ID, u.Username, u.FirstName, u.LastName))
-		}
-		b.sendMessage(msg.Chat.ID, bld.String())
-	case "remove":
-		args := strings.Fields(msg.CommandArguments())
-		if len(args) != 1 {
-			b.sendMessage(msg.Chat.ID, "Usage: /remove <user_id>")
-			return
-		}
-		uid, err := strconv.ParseInt(args[0], 10, 64)
-		if err != nil {
-			b.sendMessage(msg.Chat.ID, "Некорректный user_id")
-			return
-		}
-		if err := b.authSvc.Remove(uid); err != nil {
-			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Ошибка удаления: %v", err))
-			return
-		}
-		b.sendMessage(msg.Chat.ID, fmt.Sprintf("Пользователь %d удален из allowlist", uid))
-	case "pending":
-		var bld strings.Builder
-		bld.WriteString("Pending заявки:\n")
-		for _, u := range b.pending {
-			bld.WriteString(fmt.Sprintf("- id=%d, username=@%s, name=%s %s\n", u.ID, u.Username, u.FirstName, u.LastName))
-		}
-		b.sendMessage(msg.Chat.ID, bld.String())
-	case "approve":
-		args := strings.Fields(msg.CommandArguments())
-		if len(args) != 1 {
-			b.sendMessage(msg.Chat.ID, "Usage: /approve <user_id>")
-			return
-		}
-		uid, err := strconv.ParseInt(args[0], 10, 64)
-		if err != nil {
-			b.sendMessage(msg.Chat.ID, "Некорректный user_id")
-			return
-		}
-		b.approveUser(uid, msg.Chat.ID)
-	case "deny":
-		args := strings.Fields(msg.CommandArguments())
-		if len(args) != 1 {
-			b.sendMessage(msg.Chat.ID, "Usage: /deny <user_id>")
-			return
-		}
-		uid, err := strconv.ParseInt(args[0], 10, 64)
-		if err != nil {
-			b.sendMessage(msg.Chat.ID, "Некорректный user_id")
-			return
-		}
-		b.denyUser(uid, msg.Chat.ID)
-	}
-}
+// handleCommand is implemented in handlers.go
 
 func (b *Bot) handleAdminConfigCommands(msg *tgbotapi.Message) {
 	if msg.From.ID != b.adminUserID {
@@ -507,55 +312,7 @@ func (b *Bot) handleAdminConfigCommands(msg *tgbotapi.Message) {
 	}
 }
 
-// JSON parsing
-
-type llmJSON struct {
-	Title             string `json:"title"`
-	Answer            string `json:"answer"`
-	CompressedContext string `json:"compressed_context"`
-	Status            string `json:"status"`
-}
-
-type llmJSONFlexible struct {
-	Title             string          `json:"title"`
-	Answer            string          `json:"answer"`
-	CompressedContext json.RawMessage `json:"compressed_context"`
-	Status            string          `json:"status"`
-}
-
-func compactJSON(raw json.RawMessage) (string, bool) {
-	if len(raw) == 0 || string(raw) == "null" {
-		return "", false
-	}
-	var s string
-	if err := json.Unmarshal(raw, &s); err == nil {
-		return s, true
-	}
-	var any interface{}
-	if err := json.Unmarshal(raw, &any); err != nil {
-		return "", false
-	}
-	b, err := json.Marshal(any)
-	if err != nil {
-		return "", false
-	}
-	return string(b), true
-}
-
-func parseLLMJSON(s string) (llmJSON, bool) {
-	var v llmJSON
-	if err := json.Unmarshal([]byte(s), &v); err == nil {
-		if v.Title != "" || v.Answer != "" || v.CompressedContext != "" || v.Status != "" {
-			return v, true
-		}
-	}
-	var f llmJSONFlexible
-	if err := json.Unmarshal([]byte(s), &f); err != nil {
-		return llmJSON{}, false
-	}
-	cc, _ := compactJSON(f.CompressedContext)
-	return llmJSON{Title: f.Title, Answer: f.Answer, CompressedContext: cc, Status: f.Status}, true
-}
+// JSON parsing moved to process.go
 
 func (b *Bot) formatTitleAnswer(title, answer string) string {
 	pm := strings.ToLower(b.parseModeValue())
@@ -595,7 +352,7 @@ func (b *Bot) logLLMRequest(userID int64, purpose string, msgs []llm.Message) {
 		content := truncateForLog(m.Content, 1500)
 		bld.WriteString(fmt.Sprintf("  [%d] role=%s len=%d\n      %s\n", i, m.Role, len(m.Content), content))
 	}
-	log.Printf(bld.String())
+	log.Print(bld.String())
 }
 
 // Retry to conform to schema
@@ -625,304 +382,40 @@ func (b *Bot) buildContextWithOverflow(ctx context.Context, userID int64) []llm.
 
 // Command handling additions
 
-func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) {
-	if !b.authSvc.IsAllowed(msg.From.ID) {
-		log.Printf("Unauthorized access attempt by user ID: %d, username: @%s", msg.From.ID, msg.From.UserName)
-		if _, ok := b.pending[msg.From.ID]; ok {
-			b.sendMessage(msg.Chat.ID, "Ваш запрос на доступ уже отправлен администратору. Пожалуйста, ожидайте подтверждения. Как только доступ будет предоставлен, я уведомлю вас.")
-			return
-		}
-		u := auth.User{ID: msg.From.ID, Username: msg.From.UserName, FirstName: msg.From.FirstName, LastName: msg.From.LastName}
-		b.pending[msg.From.ID] = u
-		if b.pendingRepo != nil {
-			_ = b.pendingRepo.Upsert(u)
-		}
-		b.sendMessage(msg.Chat.ID, "Запрос на доступ отправлен администратору. Как только он подтвердит, вы получите уведомление.")
-		b.notifyAdminRequest(msg.From.ID, msg.From.UserName)
+// moved: handlers in handlers.go
+
+func (b *Bot) approveUser(id int64) {
+	u := b.pending[id]
+	if u.ID == 0 {
 		return
 	}
-	log.Printf("Incoming message from %d (@%s): %q", msg.From.ID, msg.From.UserName, msg.Text)
-	b.history.AppendUser(msg.From.ID, msg.Text)
-	if b.recorder != nil {
-		tru := true
-		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: msg.From.ID, UserMessage: msg.Text, CanUse: &tru})
-	}
-
-	// In TZ mode: if no steps left, finalize immediately
-	if b.isTZMode(msg.From.ID) && b.getTZRemaining(msg.From.ID) <= 0 {
-		if pFinal, respFinal, okFinal := b.produceFinalTS(ctx, msg.From.ID); okFinal {
-			answerToSend := pFinal.Answer
-			if pFinal.Title != "" {
-				answerToSend = b.formatTitleAnswer(pFinal.Title, pFinal.Answer)
-			}
-			b.history.AppendAssistantWithUsed(msg.From.ID, answerToSend, true)
-			if b.recorder != nil {
-				tru := true
-				_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: msg.From.ID, AssistantResponse: answerToSend, CanUse: &tru})
-			}
-			metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", respFinal.Model, respFinal.PromptTokens, respFinal.CompletionTokens, respFinal.TotalTokens)
-			metaEsc := b.escapeIfNeeded(metaLine)
-			pm := strings.ToLower(b.parseModeValue())
-			var header string
-			switch pm {
-			case strings.ToLower(tgbotapi.ModeHTML):
-				header = "<b>ТЗ Готово</b>"
-			case strings.ToLower(tgbotapi.ModeMarkdownV2):
-				header = escapeMarkdownV2("ТЗ Готово")
-			default:
-				header = "**ТЗ Готово**"
-			}
-			final := metaEsc + "\n\n" + header + "\n\n" + answerToSend
-			msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
-			msgOut.ReplyMarkup = b.menuKeyboard()
-			msgOut.ParseMode = b.parseModeValue()
-			_, _ = b.s.Send(msgOut)
-			b.clearTZState(msg.From.ID)
-			return
-		}
-	}
-
-	contextMsgs := b.buildContextWithOverflow(ctx, msg.From.ID)
-	if b.isTZMode(msg.From.ID) {
-		left := b.getTZRemaining(msg.From.ID)
-		if left > 0 && left <= 2 {
-			accel := "Осталось очень мало сообщений для уточнений (<=2). Сократи количество вопросов и постарайся завершить формирование ТЗ как можно скорее. Если возможно — финализируй уже в этом ответе (status='final')."
-			contextMsgs = append([]llm.Message{{Role: "system", Content: accel}}, contextMsgs...)
-		}
-	}
-	b.logLLMRequest(msg.From.ID, "chat", contextMsgs)
-	resp, err := b.getLLMClient().Generate(ctx, contextMsgs)
-	if err != nil {
-		b.sendMessage(msg.Chat.ID, "Sorry, something went wrong.")
-		return
-	}
-	log.Printf("LLM response [model=%s, tokens: prompt=%d, completion=%d, total=%d]: %q", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens, resp.Content)
-	parsed, ok := parseLLMJSON(resp.Content)
-	if !ok {
-		if p2, ok2 := b.reformatToSchema(ctx, msg.From.ID, resp.Content); ok2 {
-			parsed = p2
-			ok = true
-		}
-	}
-
-	if ok && strings.TrimSpace(parsed.CompressedContext) != "" {
-		b.addUserSystemPrompt(msg.From.ID, parsed.CompressedContext)
-		b.history.DisableAll(msg.From.ID)
-	}
-
-	answerToSend := resp.Content
-	if ok && parsed.Answer != "" {
-		answerToSend = parsed.Answer
-	}
-	status := ""
-	if ok {
-		status = strings.ToLower(strings.TrimSpace(parsed.Status))
-	}
-
-	if b.isTZMode(msg.From.ID) && status != "final" {
-		left := b.decTZRemaining(msg.From.ID)
-		if left <= 0 {
-			if pFinal, respFinal, okFinal := b.produceFinalTS(ctx, msg.From.ID); okFinal {
-				answerToSend = pFinal.Answer
-				if pFinal.Title != "" {
-					answerToSend = b.formatTitleAnswer(pFinal.Title, pFinal.Answer)
-				}
-				status = "final"
-				metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", respFinal.Model, respFinal.PromptTokens, respFinal.CompletionTokens, respFinal.TotalTokens)
-				metaEsc := b.escapeIfNeeded(metaLine)
-				pm := strings.ToLower(b.parseModeValue())
-				var header string
-				switch pm {
-				case strings.ToLower(tgbotapi.ModeHTML):
-					header = "<b>ТЗ Готово</b>"
-				case strings.ToLower(tgbotapi.ModeMarkdownV2):
-					header = escapeMarkdownV2("ТЗ Готово")
-				default:
-					header = "**ТЗ Готово**"
-				}
-				final := metaEsc + "\n\n" + header + "\n\n" + answerToSend
-				msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
-				msgOut.ReplyMarkup = b.menuKeyboard()
-				msgOut.ParseMode = b.parseModeValue()
-				_, _ = b.s.Send(msgOut)
-				b.clearTZState(msg.From.ID)
-				return
-			}
-		}
-	}
-
-	b.history.AppendAssistantWithUsed(msg.From.ID, answerToSend, true)
-	if b.recorder != nil {
-		tru := true
-		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: msg.From.ID, AssistantResponse: answerToSend, CanUse: &tru})
-	}
-	metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
-	metaEsc := b.escapeIfNeeded(metaLine)
-	body := answerToSend
-	if ok && parsed.Title != "" {
-		body = b.formatTitleAnswer(parsed.Title, answerToSend)
-	}
-	if status == "final" && b.isTZMode(msg.From.ID) {
-		pm := strings.ToLower(b.parseModeValue())
-		var header string
-		switch pm {
-		case strings.ToLower(tgbotapi.ModeHTML):
-			header = "<b>ТЗ Готово</b>"
-		case strings.ToLower(tgbotapi.ModeMarkdownV2):
-			header = escapeMarkdownV2("ТЗ Готово")
-		default:
-			header = "**ТЗ Готово**"
-		}
-		body = header + "\n\n" + body
-		b.clearTZState(msg.From.ID)
-	}
-	final := metaEsc + "\n\n" + body
-	msgOut := tgbotapi.NewMessage(msg.Chat.ID, final)
-	msgOut.ReplyMarkup = b.menuKeyboard()
-	msgOut.ParseMode = b.parseModeValue()
-	if _, err := b.s.Send(msgOut); err != nil {
-		log.Printf("failed to send message: %v", err)
-	}
-}
-
-func (b *Bot) notifyAdminRequest(userID int64, username string) {
-	if b.adminUserID == 0 {
-		return
-	}
-	text := fmt.Sprintf("Пользователь @%s с id %d хочет пользоваться ботом", username, userID)
-	kb := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("разрешить", approvePrefix+strconv.FormatInt(userID, 10)),
-			tgbotapi.NewInlineKeyboardButtonData("запретить", denyPrefix+strconv.FormatInt(userID, 10)),
-		),
-	)
-	msg := tgbotapi.NewMessage(b.adminUserID, b.escapeIfNeeded(text))
-	msg.ParseMode = b.parseModeValue()
-	msg.ReplyMarkup = kb
-	_, _ = b.s.Send(msg)
-}
-
-func (b *Bot) handleCallback(ctx context.Context, cb *tgbotapi.CallbackQuery) {
-	switch {
-	case cb.Data == resetCmd:
-		b.history.DisableAll(cb.From.ID)
-		if b.recorder != nil {
-			if err := b.recorder.SetAllCanUse(cb.From.ID, false); err != nil {
-				log.Printf("failed to persist can_use=false: %v", err)
-			}
-		}
-		msg := tgbotapi.NewMessage(cb.Message.Chat.ID, b.escapeIfNeeded("Контекст сброшен"))
-		msg.ParseMode = b.parseModeValue()
-		if _, err := b.s.Send(msg); err != nil {
-			log.Printf("failed to send reset confirmation: %v", err)
-		}
-	case cb.Data == summaryCmd:
-		b.handleSummary(ctx, cb)
-	case len(cb.Data) > len(approvePrefix) && cb.Data[:len(approvePrefix)] == approvePrefix:
-		b.handleApproval(cb, true)
-	case len(cb.Data) > len(denyPrefix) && cb.Data[:len(denyPrefix)] == denyPrefix:
-		b.handleApproval(cb, false)
-	}
-}
-
-func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
-	h := b.history.Get(cb.From.ID)
-	if len(h) == 0 {
-		m := tgbotapi.NewMessage(cb.Message.Chat.ID, b.escapeIfNeeded("История пуста"))
-		m.ParseMode = b.parseModeValue()
-		_, _ = b.s.Send(m)
-		return
-	}
-	msgs := b.buildContextWithOverflow(ctx, cb.From.ID)
-	// strengthen instruction to return our schema
-	msgs = append([]llm.Message{{Role: "system", Content: "Суммируй переписку. Ответ строго в JSON со схемой {title, answer, compressed_context}."}}, msgs...)
-	b.logLLMRequest(cb.From.ID, "summary", msgs)
-	resp, err := b.getLLMClient().Generate(ctx, msgs)
-	if err != nil {
-		m := tgbotapi.NewMessage(cb.Message.Chat.ID, b.escapeIfNeeded("Не удалось собрать саммари"))
-		m.ParseMode = b.parseModeValue()
-		_, _ = b.s.Send(m)
-		return
-	}
-	parsed, ok := parseLLMJSON(resp.Content)
-	if !ok {
-		if p2, ok2 := b.reformatToSchema(ctx, cb.From.ID, resp.Content); ok2 {
-			parsed = p2
-			ok = true
-		}
-	}
-	if ok && strings.TrimSpace(parsed.CompressedContext) != "" {
-		b.addUserSystemPrompt(cb.From.ID, parsed.CompressedContext)
-		b.history.DisableAll(cb.From.ID)
-	}
-	answerToSend := resp.Content
-	if ok && parsed.Answer != "" {
-		answerToSend = parsed.Answer
-	}
-	b.history.AppendAssistantWithUsed(cb.From.ID, answerToSend, true)
-	if b.recorder != nil {
-		tru := true
-		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: cb.From.ID, AssistantResponse: answerToSend, CanUse: &tru})
-	}
-	metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
-	metaEsc := b.escapeIfNeeded(metaLine)
-	body := answerToSend
-	if ok && parsed.Title != "" {
-		body = b.formatTitleAnswer(parsed.Title, answerToSend)
-	}
-	final := metaEsc + "\n\n" + body
-	m := tgbotapi.NewMessage(cb.Message.Chat.ID, final)
-	m.ParseMode = b.parseModeValue()
-	m.ReplyMarkup = b.menuKeyboard()
-	_, _ = b.s.Send(m)
-}
-
-func (b *Bot) handleApproval(cb *tgbotapi.CallbackQuery, approve bool) {
-	idStr := cb.Data
-	pref := denyPrefix
-	if approve {
-		pref = approvePrefix
-	}
-	userID, err := strconv.ParseInt(idStr[len(pref):], 10, 64)
-	if err != nil {
-		return
-	}
-	if approve {
-		b.approveUser(userID, cb.Message.Chat.ID)
-	} else {
-		b.denyUser(userID, cb.Message.Chat.ID)
-	}
-}
-
-func (b *Bot) approveUser(userID int64, notifyChatID int64) {
-	u := b.pending[userID]
-	if u.ID == 0 { // fallback if no pending cache
-		u = auth.User{ID: userID}
+	delete(b.pending, id)
+	if b.pendingRepo != nil {
+		_ = b.pendingRepo.Remove(id)
 	}
 	_ = b.authSvc.Upsert(u)
-	delete(b.pending, userID)
-	if b.pendingRepo != nil {
-		_ = b.pendingRepo.Remove(userID)
-	}
-	msg := tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователь %d разрешен", userID))
+	msg := tgbotapi.NewMessage(b.adminUserID, b.escapeIfNeeded(fmt.Sprintf("Пользователь @%s (%d) добавлен в allowlist", u.Username, u.ID)))
 	msg.ParseMode = b.parseModeValue()
 	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to notify approval: %v", err)
 	}
-	msg2 := tgbotapi.NewMessage(userID, "Доступ к боту разрешён. Можете пользоваться.")
+	msg2 := tgbotapi.NewMessage(u.ID, b.escapeIfNeeded("Ваш доступ к боту подтвержден. Добро пожаловать!"))
 	msg2.ParseMode = b.parseModeValue()
 	if _, err := b.s.Send(msg2); err != nil {
 		log.Printf("failed to notify user approval: %v", err)
 	}
 }
 
-func (b *Bot) denyUser(userID int64, notifyChatID int64) {
-	_ = b.authSvc.Remove(userID)
-	delete(b.pending, userID)
-	if b.pendingRepo != nil {
-		_ = b.pendingRepo.Remove(userID)
+func (b *Bot) denyUser(id int64) {
+	u := b.pending[id]
+	if u.ID == 0 {
+		return
 	}
-	msg := tgbotapi.NewMessage(notifyChatID, fmt.Sprintf("Пользователю %d отказано", userID))
+	delete(b.pending, id)
+	if b.pendingRepo != nil {
+		_ = b.pendingRepo.Remove(id)
+	}
+	msg := tgbotapi.NewMessage(b.adminUserID, b.escapeIfNeeded(fmt.Sprintf("Пользователю @%s (%d) отказано в доступе", u.Username, u.ID)))
 	msg.ParseMode = b.parseModeValue()
 	if _, err := b.s.Send(msg); err != nil {
 		log.Printf("failed to notify denial: %v", err)
@@ -965,6 +458,9 @@ func (b *Bot) addUserSystemPromptInternal(userID int64, addition string, persist
 		return
 	}
 	b.userSysMu.Lock()
+	if b.userSystemPrompt == nil {
+		b.userSystemPrompt = make(map[int64]string)
+	}
 	current := b.userSystemPrompt[userID]
 	if current == "" {
 		current = b.systemPrompt
@@ -988,29 +484,44 @@ func (b *Bot) addUserSystemPromptInternal(userID int64, addition string, persist
 
 func (b *Bot) setTZMode(userID int64, on bool) {
 	b.tzMu.Lock()
+	if b.tzMode == nil {
+		b.tzMode = make(map[int64]bool)
+	}
 	b.tzMode[userID] = on
 	b.tzMu.Unlock()
 }
 func (b *Bot) isTZMode(userID int64) bool {
 	b.tzMu.RLock()
-	v := b.tzMode[userID]
+	v := false
+	if b.tzMode != nil {
+		v = b.tzMode[userID]
+	}
 	b.tzMu.RUnlock()
 	return v
 }
 
 func (b *Bot) setTZRemaining(userID int64, steps int) {
 	b.tzMu.Lock()
+	if b.tzRemaining == nil {
+		b.tzRemaining = make(map[int64]int)
+	}
 	b.tzRemaining[userID] = steps
 	b.tzMu.Unlock()
 }
 func (b *Bot) getTZRemaining(userID int64) int {
 	b.tzMu.RLock()
-	v := b.tzRemaining[userID]
+	v := 0
+	if b.tzRemaining != nil {
+		v = b.tzRemaining[userID]
+	}
 	b.tzMu.RUnlock()
 	return v
 }
 func (b *Bot) decTZRemaining(userID int64) int {
 	b.tzMu.Lock()
+	if b.tzRemaining == nil {
+		b.tzRemaining = make(map[int64]int)
+	}
 	left := b.tzRemaining[userID]
 	if left > 0 {
 		left--
@@ -1021,8 +532,12 @@ func (b *Bot) decTZRemaining(userID int64) int {
 }
 func (b *Bot) clearTZState(userID int64) {
 	b.tzMu.Lock()
-	delete(b.tzMode, userID)
-	delete(b.tzRemaining, userID)
+	if b.tzMode != nil {
+		delete(b.tzMode, userID)
+	}
+	if b.tzRemaining != nil {
+		delete(b.tzRemaining, userID)
+	}
 	b.tzMu.Unlock()
 }
 
