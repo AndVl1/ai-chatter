@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"os"
 	"strings"
 	"testing"
 
@@ -25,7 +26,7 @@ type fakeLLMSeq struct {
 	lastMsgs [][]llm.Message
 }
 
-func (f *fakeLLMSeq) Generate(ctx context.Context, msgs []llm.Message) (llm.Response, error) {
+func (f *fakeLLMSeq) Generate(_ context.Context, msgs []llm.Message) (llm.Response, error) {
 	f.lastMsgs = append(f.lastMsgs, append([]llm.Message(nil), msgs...))
 	idx := f.calls
 	if idx >= len(f.seq) {
@@ -41,7 +42,7 @@ func (f *fakeSender) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	return tgbotapi.Message{}, nil
 }
 
-func (f fakeLLM) Generate(ctx context.Context, msgs []llm.Message) (llm.Response, error) {
+func (f fakeLLM) Generate(_ context.Context, _ []llm.Message) (llm.Response, error) {
 	return f.resp, f.err
 }
 
@@ -152,15 +153,17 @@ func TestTZ_BootstrapFinalAddsHeader(t *testing.T) {
 	msg.Entities = ents
 	b.handleCommand(msg)
 
-	if len(fs.sent) != 1 {
-		t.Fatalf("expected bootstrap answer, got %d", len(fs.sent))
+	if len(fs.sent) != 3 {
+		t.Fatalf("expected 3 messages (final TS, prep, instruction), got %d", len(fs.sent))
 	}
-	out := fs.sent[0]
-	if !strings.Contains(out, "ТЗ Готово") {
-		t.Fatalf("missing final header: %q", out)
+	if !strings.Contains(fs.sent[0], "ТЗ Готово") {
+		t.Fatalf("missing final header: %q", fs.sent[0])
 	}
-	if b.isTZMode(userID) {
-		t.Fatalf("tz mode should be off after final")
+	if !strings.Contains(strings.ToLower(fs.sent[1]), "инструк") {
+		t.Fatalf("missing instruction prep notice: %q", fs.sent[1])
+	}
+	if !strings.Contains(fs.sent[2], "<b>T</b>") || !strings.Contains(fs.sent[2], "A") {
+		t.Fatalf("instruction not formatted as expected: %q", fs.sent[2])
 	}
 }
 
@@ -228,14 +231,109 @@ func TestTZ_LimitForcesFinalize(t *testing.T) {
 	m := &tgbotapi.Message{From: &tgbotapi.User{ID: userID}, Chat: &tgbotapi.Chat{ID: 500}, Text: "go"}
 	b.handleIncomingMessage(context.Background(), m)
 
-	if len(fs.sent) != 1 {
-		t.Fatalf("expected one final message sent, got %d", len(fs.sent))
+	if len(fs.sent) != 3 {
+		t.Fatalf("expected three messages (final TS, prep, instruction), got %d", len(fs.sent))
 	}
-	out := fs.sent[0]
-	if !strings.Contains(out, "ТЗ Готово") || !strings.Contains(out, "A-F") {
-		t.Fatalf("forced finalization not reflected: %q", out)
+	if !strings.Contains(fs.sent[0], "ТЗ Готово") {
+		t.Fatalf("missing final header: %q", fs.sent[0])
+	}
+	if !strings.Contains(strings.ToLower(fs.sent[1]), "инструк") {
+		t.Fatalf("missing instruction prep: %q", fs.sent[1])
+	}
+	if !strings.Contains(fs.sent[2], "<b>T-F</b>") || !strings.Contains(fs.sent[2], "A-F") {
+		t.Fatalf("missing instruction content: %q", fs.sent[2])
 	}
 	if b.isTZMode(userID) {
 		t.Fatalf("tz mode should be cleared")
+	}
+}
+
+func TestAdminSetsModel2_UsedForInstructions(t *testing.T) {
+	userID := int64(5555)
+	svc, _ := auth.NewWithRepo(nil, []int64{userID})
+	fs := &fakeSender{}
+	// First: tz bootstrap returns final; Then: second model instruction also returns json
+	seq := &fakeLLMSeq{seq: []llm.Response{
+		{Content: `{"title":"T","answer":"A","status":"final"}`, Model: "m-primary"},
+		{Content: `{"title":"Instr","answer":"Do this","status":"final"}`, Model: "m-secondary"},
+	}}
+	b := &Bot{
+		s:            fs,
+		authSvc:      svc,
+		llmClient:    seq,
+		llmClient2:   seq,
+		pending:      make(map[int64]auth.User),
+		parseMode:    "HTML",
+		systemPrompt: "base",
+	}
+	b.history = history.NewManager()
+	b.provider = "openai"
+	b.openaiAPIKey = "test"
+	b.openaiBaseURL = "http://example.local"
+	b.model = "model-primary"
+
+	// Admin sets model2
+	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 0}, Chat: &tgbotapi.Chat{ID: 42}, Text: "/model2 openai/secondary"}
+	ents := []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 7}}
+	msg.Entities = ents
+	b.adminUserID = 1
+	msg.From.ID = 1
+	b.handleAdminConfigCommands(msg)
+
+	// Check file persisted (best-effort)
+	_, _ = os.ReadFile("data/model2.txt")
+
+	// Simulate /tz to run flow
+	tz := &tgbotapi.Message{From: &tgbotapi.User{ID: userID}, Chat: &tgbotapi.Chat{ID: 99}, Text: "/tz topic"}
+	tz.Entities = []tgbotapi.MessageEntity{{Type: "bot_command", Offset: 0, Length: 3}}
+	b.handleCommand(tz)
+
+	// Expect 4 messages: admin confirm, final TS, prep, instruction
+	if len(fs.sent) != 4 {
+		t.Fatalf("expected 4 messages, got %d: %#v", len(fs.sent), fs.sent)
+	}
+	if !strings.Contains(fs.sent[1], "ТЗ Готово") {
+		t.Fatalf("missing final header: %q", fs.sent[1])
+	}
+	if !strings.Contains(strings.ToLower(fs.sent[2]), "инструк") {
+		t.Fatalf("missing instruction prep notice: %q", fs.sent[2])
+	}
+	if !strings.Contains(fs.sent[3], "Instr") || !strings.Contains(fs.sent[3], "Do this") {
+		t.Fatalf("instruction not sent as expected: %q", fs.sent[3])
+	}
+}
+
+func TestTZ_CheckerCorrectsPrimaryResponse(t *testing.T) {
+	userID := int64(6666)
+	svc, _ := auth.NewWithRepo(nil, []int64{userID})
+	fs := &fakeSender{}
+	// Sequence: primary bad (continue, non-numbered), checker fail, primary corrected (continue, numbered)
+	seq := &fakeLLMSeq{seq: []llm.Response{
+		{Content: `{"title":"T","answer":"Question one; Question two","status":"continue"}`, Model: "m"},       // primary
+		{Content: `{"status":"fail","msg":"Сделай вопросы нумерованными построчно"}`, Model: "m2"},             // checker
+		{Content: `{"title":"T","answer":"1. Question one\n2. Question two","status":"continue"}`, Model: "m"}, // corrected
+	}}
+	b := &Bot{
+		s:            fs,
+		authSvc:      svc,
+		llmClient:    seq,
+		llmClient2:   seq,
+		pending:      make(map[int64]auth.User),
+		parseMode:    "HTML",
+		systemPrompt: "base",
+	}
+	b.history = history.NewManager()
+	b.setTZMode(userID, true)
+	b.setTZRemaining(userID, 2)
+
+	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: userID}, Chat: &tgbotapi.Chat{ID: 600}, Text: "hi"}
+	b.handleIncomingMessage(context.Background(), msg)
+
+	if len(fs.sent) != 1 {
+		t.Fatalf("expected 1 message, got %d", len(fs.sent))
+	}
+	out := fs.sent[0]
+	if !strings.Contains(out, "1. Question one") || !strings.Contains(out, "2. Question two") {
+		t.Fatalf("corrected numbering not applied: %q", out)
 	}
 }

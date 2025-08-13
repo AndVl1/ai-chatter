@@ -29,7 +29,7 @@ func (t headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return t.rt.RoundTrip(cl)
 }
 
-func NewOpenAI(apiKey, baseURL, model string, referrer, title string) *OpenAIClient {
+func NewOpenAI(apiKey, baseURL, model, referrer, title string) *OpenAIClient {
 	config := openai.DefaultConfig(apiKey)
 	if baseURL != "" {
 		config.BaseURL = baseURL

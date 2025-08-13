@@ -20,31 +20,33 @@ import (
 )
 
 const (
-	resetCmd        = "reset_ctx"
-	summaryCmd      = "summary_ctx"
-	approvePrefix   = "approve:"
-	denyPrefix      = "deny:"
-	maxContextChars = 16000
-	spUpdateMarker  = "[system_prompt_update]"
+	resetCmd       = "reset_ctx"
+	summaryCmd     = "summary_ctx"
+	approvePrefix  = "approve:"
+	denyPrefix     = "deny:"
+	spUpdateMarker = "[system_prompt_update]"
 	// TZ conversation limit (assistant clarification turns)
 	tzMaxSteps = 15
 )
 
 type Bot struct {
-	api                *tgbotapi.BotAPI
-	s                  sender
-	authSvc            *auth.Service
-	systemPrompt       string
-	llmClient          llm.Client
-	llmMu              sync.RWMutex
-	history            *history.Manager
-	recorder           storage.Recorder
-	adminUserID        int64
-	pending            map[int64]auth.User
-	pendingRepo        pending.Repository
-	parseMode          string
-	provider           string
-	model              string
+	api          *tgbotapi.BotAPI
+	s            sender
+	authSvc      *auth.Service
+	systemPrompt string
+	llmClient    llm.Client
+	llmMu        sync.RWMutex
+	history      *history.Manager
+	recorder     storage.Recorder
+	adminUserID  int64
+	pending      map[int64]auth.User
+	pendingRepo  pending.Repository
+	parseMode    string
+	provider     string
+	model        string
+	// secondary model for post-TS instruction
+	model2             string
+	llmClient2         llm.Client
 	openaiAPIKey       string
 	openaiBaseURL      string
 	openRouterReferrer string
@@ -104,6 +106,13 @@ func New(
 		tzMode:             make(map[int64]bool),
 		tzRemaining:        make(map[int64]int),
 	}
+	// Try to preload model2 from file if present
+	if data, err := os.ReadFile("data/model2.txt"); err == nil {
+		m2 := strings.TrimSpace(string(data))
+		if m2 != "" {
+			b.model2 = m2
+		}
+	}
 	b.setLLMClient(llmClient)
 	if rec != nil {
 		if events, err := rec.LoadInteractions(); err == nil {
@@ -150,6 +159,40 @@ func (b *Bot) setLLMClient(c llm.Client) {
 	b.llmClient = c
 }
 
+func (b *Bot) getSecondLLMClient() llm.Client {
+	b.llmMu.RLock()
+	cli := b.llmClient2
+	b.llmMu.RUnlock()
+	if cli != nil {
+		return cli
+	}
+	desiredModel := b.model
+	if strings.TrimSpace(b.model2) != "" {
+		desiredModel = b.model2
+	}
+	var newCli llm.Client
+	switch strings.ToLower(b.provider) {
+	case "openai":
+		newCli = llm.NewOpenAI(b.openaiAPIKey, b.openaiBaseURL, desiredModel, b.openRouterReferrer, b.openRouterTitle)
+	case "yandex":
+		c, err := llm.NewYandex(b.yandexOAuthToken, b.yandexFolderID)
+		if err == nil {
+			newCli = c
+		}
+	default:
+		newCli = b.getLLMClient()
+	}
+	b.llmMu.Lock()
+	if b.llmClient2 == nil {
+		b.llmClient2 = newCli
+		cli = newCli
+	} else {
+		cli = b.llmClient2
+	}
+	b.llmMu.Unlock()
+	return cli
+}
+
 func (b *Bot) reloadLLMClient() error {
 	var newCli llm.Client
 	switch strings.ToLower(b.provider) {
@@ -165,6 +208,9 @@ func (b *Bot) reloadLLMClient() error {
 		return fmt.Errorf("unknown provider: %s", b.provider)
 	}
 	b.setLLMClient(newCli)
+	b.llmMu.Lock()
+	b.llmClient2 = nil
+	b.llmMu.Unlock()
 	return nil
 }
 
@@ -309,6 +355,26 @@ func (b *Bot) handleAdminConfigCommands(msg *tgbotapi.Message) {
 			return
 		}
 		b.sendMessage(msg.Chat.ID, fmt.Sprintf("Модель установлена и применена: %s", model))
+	case "model2":
+		if len(args) != 1 {
+			b.sendMessage(msg.Chat.ID, "Usage: /model2 <model_name>")
+			return
+		}
+		model := args[0]
+		allowed := map[string]bool{"openai/gpt-5-nano": true, "openai/gpt-oss-20b:free": true, "qwen/qwen3-coder": true}
+		if !allowed[model] {
+			b.sendMessage(msg.Chat.ID, "Неподдерживаемая модель. Доступные: openai/gpt-5-nano, openai/gpt-oss-20b:free, qwen/qwen3-coder")
+			return
+		}
+		if err := os.WriteFile("data/model2.txt", []byte(model), 0o644); err != nil {
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Ошибка сохранения: %v", err))
+			return
+		}
+		b.model2 = model
+		b.llmMu.Lock()
+		b.llmClient2 = nil
+		b.llmMu.Unlock()
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("Вторая модель установлена: %s", model))
 	}
 }
 
