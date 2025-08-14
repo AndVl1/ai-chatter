@@ -16,7 +16,7 @@ import (
 
 // handleCommand
 func (b *Bot) handleCommand(msg *tgbotapi.Message) {
-	if msg.Command() == "provider" || msg.Command() == "model" {
+	if msg.Command() == "provider" || msg.Command() == "model" || msg.Command() == "model2" {
 		b.handleAdminConfigCommands(msg)
 		return
 	}
@@ -61,7 +61,7 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 			log.Println(err)
 			return
 		}
-		b.processLLMAndRespond(ctx, msg.Chat.ID, msg.From.ID, resp, true)
+		b.processLLMAndRespond(ctx, msg.Chat.ID, msg.From.ID, resp)
 		return
 	}
 	// admin-only commands
@@ -171,7 +171,7 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 		b.sendMessage(msg.Chat.ID, "Sorry, something went wrong.")
 		return
 	}
-	b.processLLMAndRespond(ctx, msg.Chat.ID, msg.From.ID, resp, false)
+	b.processLLMAndRespond(ctx, msg.Chat.ID, msg.From.ID, resp)
 }
 
 // notifyAdminRequest

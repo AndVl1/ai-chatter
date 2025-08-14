@@ -122,10 +122,6 @@ func readTrim(path string) string {
 	return strings.TrimSpace(string(b))
 }
 
-func newLLMClient(cfg *config.Config) (llm.Client, error) {
-	return newLLMClientWith(string(cfg.LLMProvider), cfg, cfg.OpenAIModel)
-}
-
 func newLLMClientWith(provider string, cfg *config.Config, model string) (llm.Client, error) {
 	switch provider {
 	case string(config.ProviderOpenAI):

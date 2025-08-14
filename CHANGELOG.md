@@ -51,3 +51,19 @@ All notable changes to this project will be documented in this file.
 - Logging: restored detailed logs for LLM interactions — outbound messages (purpose, roles, sizes, truncated contents) and inbound responses (model, token usage, raw content).
 - System prompt: updated to describe the new schema including `status` and the 80% context fullness rule; clarified that the model must not use formatting in its `answer`.
 - TZ mode cap: limited the clarification phase to at most 15 assistant messages. Upon reaching the cap, the bot forces finalization (requests a final TS) and returns the result with the "ТЗ Готово" marker.
+
+## [Day 4]
+- TS flow: reintroduced JSON field `status` with values `continue|final`. When `status=final` and user is in `/tz` mode, the bot decorates the answer with a "ТЗ Готово" marker and exits TZ mode.
+- LLM responses: schema simplified to `{title, answer, compressed_context, status}`; `compressed_context` is appended into per-user system prompt and disables previous history for context.
+- Logging: restored detailed logs for LLM interactions — outbound messages (purpose, roles, sizes, truncated contents) and inbound responses (model, token usage, raw content).
+- System prompt: updated to describe the new schema including `status` and the 80% context fullness rule; clarified that the model must not use formatting in its `answer`.
+- TZ mode cap: limited the clarification phase to at most 15 assistant messages. Upon reaching the cap, the bot forces finalization (requests a final TS) and returns the result with the "ТЗ Готово" marker.
+- Refactor: split Telegram logic into `bot.go`, `handlers.go`, `process.go`; unified finalization path via a single `sendFinalTS` function.
+- Numbered questions: enforced numbered list of clarifying questions (1., 2., ...) each on a new line; auto-enforced before sending when needed.
+- Context reset on `/tz`: previous user history is marked as not used (and persisted via `can_use=false`) before starting a new TZ session.
+- Secondary model (model2):
+  - Added admin command `/model2 <model>` with persistence to `data/model2.txt`; lazy initialization of a second LLM client.
+  - After sending final TS, the bot announces preparation and generates a user instruction (recipe/implementation plan) with the second model, then sends it.
+  - During TZ, after each primary model response, the second model acts as a checker: receives only `answer` and `status`, returns JSON `{ "status": "ok|fail", "msg": "..." }`. On `fail`, the bot auto-corrects the primary response using the first model with the provided `msg` and sends the corrected answer to the user.
+- Logging of checker/correction: persisted `[tz_check]` responses and `[tz_correct_req]` correction intents to the JSONL log (not used in context).
+- Tests: updated and added unit tests for finalization flow, forced finalization at cap, numbered formatting, model2 usage (`/model2`), and checker-based correction.
