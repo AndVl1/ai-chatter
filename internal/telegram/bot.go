@@ -45,18 +45,13 @@ type Bot struct {
 	provider     string
 	model        string
 	// secondary model for post-TS instruction
-	model2             string
-	llmClient2         llm.Client
-	openaiAPIKey       string
-	openaiBaseURL      string
-	openRouterReferrer string
-	openRouterTitle    string
-	yandexOAuthToken   string
-	yandexFolderID     string
-	userSysMu          sync.RWMutex
-	userSystemPrompt   map[int64]string
-	tzMu               sync.RWMutex
-	tzMode             map[int64]bool
+	model2       string
+	llmClient2   llm.Client
+	llmFactory   *llm.Factory
+	userSysMu    sync.RWMutex
+	userSystemPrompt map[int64]string
+	tzMu         sync.RWMutex
+	tzMode       map[int64]bool
 	// per-user remaining steps in TZ mode
 	tzRemaining map[int64]int
 }
@@ -65,6 +60,7 @@ func New(
 	botToken string,
 	authSvc *auth.Service,
 	llmClient llm.Client,
+	llmFactory *llm.Factory,
 	systemPrompt string,
 	rec storage.Recorder,
 	adminUserID int64,
@@ -72,39 +68,28 @@ func New(
 	parseMode string,
 	provider string,
 	model string,
-	openaiAPIKey string,
-	openaiBaseURL string,
-	openRouterReferrer string,
-	openRouterTitle string,
-	yandexOAuthToken string,
-	yandexFolderID string,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
 		return nil, err
 	}
 	b := &Bot{
-		api:                api,
-		s:                  botAPISender{api: api},
-		authSvc:            authSvc,
-		systemPrompt:       systemPrompt,
-		history:            history.NewManager(),
-		recorder:           rec,
-		adminUserID:        adminUserID,
-		pending:            make(map[int64]auth.User),
-		pendingRepo:        pendingRepo,
-		parseMode:          parseMode,
-		provider:           provider,
-		model:              model,
-		openaiAPIKey:       openaiAPIKey,
-		openaiBaseURL:      openaiBaseURL,
-		openRouterReferrer: openRouterReferrer,
-		openRouterTitle:    openRouterTitle,
-		yandexOAuthToken:   yandexOAuthToken,
-		yandexFolderID:     yandexFolderID,
-		userSystemPrompt:   make(map[int64]string),
-		tzMode:             make(map[int64]bool),
-		tzRemaining:        make(map[int64]int),
+		api:              api,
+		s:                botAPISender{api: api},
+		authSvc:          authSvc,
+		systemPrompt:     systemPrompt,
+		history:          history.NewManager(),
+		recorder:         rec,
+		adminUserID:      adminUserID,
+		pending:          make(map[int64]auth.User),
+		pendingRepo:      pendingRepo,
+		parseMode:        parseMode,
+		provider:         provider,
+		model:            model,
+		llmFactory:       llmFactory,
+		userSystemPrompt: make(map[int64]string),
+		tzMode:           make(map[int64]bool),
+		tzRemaining:      make(map[int64]int),
 	}
 	// Try to preload model2 from file if present
 	if data, err := os.ReadFile("data/model2.txt"); err == nil {
@@ -166,22 +151,18 @@ func (b *Bot) getSecondLLMClient() llm.Client {
 	if cli != nil {
 		return cli
 	}
+	
 	desiredModel := b.model
 	if strings.TrimSpace(b.model2) != "" {
 		desiredModel = b.model2
 	}
-	var newCli llm.Client
-	switch strings.ToLower(b.provider) {
-	case "openai":
-		newCli = llm.NewOpenAI(b.openaiAPIKey, b.openaiBaseURL, desiredModel, b.openRouterReferrer, b.openRouterTitle)
-	case "yandex":
-		c, err := llm.NewYandex(b.yandexOAuthToken, b.yandexFolderID)
-		if err == nil {
-			newCli = c
-		}
-	default:
+	
+	newCli, err := b.llmFactory.CreateClient(b.provider, desiredModel)
+	if err != nil {
+		// Fallback to primary client
 		newCli = b.getLLMClient()
 	}
+	
 	b.llmMu.Lock()
 	if b.llmClient2 == nil {
 		b.llmClient2 = newCli
@@ -194,19 +175,11 @@ func (b *Bot) getSecondLLMClient() llm.Client {
 }
 
 func (b *Bot) reloadLLMClient() error {
-	var newCli llm.Client
-	switch strings.ToLower(b.provider) {
-	case "openai":
-		newCli = llm.NewOpenAI(b.openaiAPIKey, b.openaiBaseURL, b.model, b.openRouterReferrer, b.openRouterTitle)
-	case "yandex":
-		cli, err := llm.NewYandex(b.yandexOAuthToken, b.yandexFolderID)
-		if err != nil {
-			return err
-		}
-		newCli = cli
-	default:
-		return fmt.Errorf("unknown provider: %s", b.provider)
+	newCli, err := b.llmFactory.CreateClient(b.provider, b.model)
+	if err != nil {
+		return err
 	}
+	
 	b.setLLMClient(newCli)
 	b.llmMu.Lock()
 	b.llmClient2 = nil
@@ -336,13 +309,14 @@ func (b *Bot) handleAdminConfigCommands(msg *tgbotapi.Message) {
 		b.sendMessage(msg.Chat.ID, fmt.Sprintf("Провайдер установлен и применён: %s", prov))
 	case "model":
 		if len(args) != 1 {
-			b.sendMessage(msg.Chat.ID, "Usage: /model <openai/gpt-5-nano|openai/gpt-oss-20b:free|qwen/qwen3-coder>")
+			allowedModels := strings.Join(llm.GetAllowedModels(), "|")
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Usage: /model <%s>", allowedModels))
 			return
 		}
 		model := args[0]
-		allowed := map[string]bool{"openai/gpt-5-nano": true, "openai/gpt-oss-20b:free": true, "qwen/qwen3-coder": true}
-		if !allowed[model] {
-			b.sendMessage(msg.Chat.ID, "Неподдерживаемая модель. Доступные: openai/gpt-5-nano, openai/gpt-oss-20b:free, qwen/qwen3-coder")
+		if !llm.IsModelAllowed(model) {
+			allowedModels := strings.Join(llm.GetAllowedModels(), ", ")
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Неподдерживаемая модель. Доступные: %s", allowedModels))
 			return
 		}
 		if err := os.WriteFile("data/model.txt", []byte(model), 0o644); err != nil {
@@ -357,13 +331,14 @@ func (b *Bot) handleAdminConfigCommands(msg *tgbotapi.Message) {
 		b.sendMessage(msg.Chat.ID, fmt.Sprintf("Модель установлена и применена: %s", model))
 	case "model2":
 		if len(args) != 1 {
-			b.sendMessage(msg.Chat.ID, "Usage: /model2 <model_name>")
+			allowedModels := strings.Join(llm.GetAllowedModels(), "|")
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Usage: /model2 <%s>", allowedModels))
 			return
 		}
 		model := args[0]
-		allowed := map[string]bool{"openai/gpt-5-nano": true, "openai/gpt-oss-20b:free": true, "qwen/qwen3-coder": true}
-		if !allowed[model] {
-			b.sendMessage(msg.Chat.ID, "Неподдерживаемая модель. Доступные: openai/gpt-5-nano, openai/gpt-oss-20b:free, qwen/qwen3-coder")
+		if !llm.IsModelAllowed(model) {
+			allowedModels := strings.Join(llm.GetAllowedModels(), ", ")
+			b.sendMessage(msg.Chat.ID, fmt.Sprintf("Неподдерживаемая модель. Доступные: %s", allowedModels))
 			return
 		}
 		if err := os.WriteFile("data/model2.txt", []byte(model), 0o644); err != nil {

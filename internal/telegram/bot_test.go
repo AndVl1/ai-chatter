@@ -268,9 +268,9 @@ func TestAdminSetsModel2_UsedForInstructions(t *testing.T) {
 	}
 	b.history = history.NewManager()
 	b.provider = "openai"
-	b.openaiAPIKey = "test"
-	b.openaiBaseURL = "http://example.local"
 	b.model = "model-primary"
+	// Mock factory for testing
+	b.llmFactory = &llm.Factory{}
 
 	// Admin sets model2
 	msg := &tgbotapi.Message{From: &tgbotapi.User{ID: 0}, Chat: &tgbotapi.Chat{ID: 42}, Text: "/model2 openai/secondary"}
