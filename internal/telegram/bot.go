@@ -15,6 +15,7 @@ import (
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/history"
 	"ai-chatter/internal/llm"
+	"ai-chatter/internal/notion"
 	"ai-chatter/internal/pending"
 	"ai-chatter/internal/storage"
 )
@@ -45,15 +46,17 @@ type Bot struct {
 	provider     string
 	model        string
 	// secondary model for post-TS instruction
-	model2       string
-	llmClient2   llm.Client
-	llmFactory   *llm.Factory
-	userSysMu    sync.RWMutex
+	model2           string
+	llmClient2       llm.Client
+	llmFactory       *llm.Factory
+	userSysMu        sync.RWMutex
 	userSystemPrompt map[int64]string
-	tzMu         sync.RWMutex
-	tzMode       map[int64]bool
+	tzMu             sync.RWMutex
+	tzMode           map[int64]bool
 	// per-user remaining steps in TZ mode
 	tzRemaining map[int64]int
+	// Notion MCP client
+	mcpClient *notion.MCPClient
 }
 
 func New(
@@ -68,6 +71,7 @@ func New(
 	parseMode string,
 	provider string,
 	model string,
+	mcpClient *notion.MCPClient,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
@@ -90,6 +94,7 @@ func New(
 		userSystemPrompt: make(map[int64]string),
 		tzMode:           make(map[int64]bool),
 		tzRemaining:      make(map[int64]int),
+		mcpClient:        mcpClient,
 	}
 	// Try to preload model2 from file if present
 	if data, err := os.ReadFile("data/model2.txt"); err == nil {
@@ -151,18 +156,18 @@ func (b *Bot) getSecondLLMClient() llm.Client {
 	if cli != nil {
 		return cli
 	}
-	
+
 	desiredModel := b.model
 	if strings.TrimSpace(b.model2) != "" {
 		desiredModel = b.model2
 	}
-	
+
 	newCli, err := b.llmFactory.CreateClient(b.provider, desiredModel)
 	if err != nil {
 		// Fallback to primary client
 		newCli = b.getLLMClient()
 	}
-	
+
 	b.llmMu.Lock()
 	if b.llmClient2 == nil {
 		b.llmClient2 = newCli
@@ -179,7 +184,7 @@ func (b *Bot) reloadLLMClient() error {
 	if err != nil {
 		return err
 	}
-	
+
 	b.setLLMClient(newCli)
 	b.llmMu.Lock()
 	b.llmClient2 = nil

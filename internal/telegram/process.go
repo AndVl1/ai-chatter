@@ -197,6 +197,13 @@ func enforceNumberedListIfNeeded(answer string) string {
 func (b *Bot) processLLMAndRespond(ctx context.Context, chatID int64, userID int64, resp llm.Response) {
 	// log inbound
 	b.logResponse(resp)
+
+	// Обрабатываем function calls если они есть
+	if len(resp.ToolCalls) > 0 {
+		b.handleFunctionCalls(ctx, chatID, userID, resp.ToolCalls)
+		return
+	}
+
 	parsed, ok := parseLLMJSON(resp.Content)
 	if !ok {
 		if p2, ok2 := b.reformatToSchema(ctx, userID, resp.Content); ok2 {
@@ -364,3 +371,102 @@ func (b *Bot) logResponse(resp llm.Response) {
 }
 
 func (b *Bot) nowUTC() time.Time { return time.Now().UTC() }
+
+// handleFunctionCalls обрабатывает вызовы функций от LLM
+func (b *Bot) handleFunctionCalls(ctx context.Context, chatID, userID int64, toolCalls []llm.ToolCall) {
+	if b.mcpClient == nil {
+		b.sendMessage(chatID, "Notion интеграция не настроена.")
+		return
+	}
+
+	for _, tc := range toolCalls {
+		switch tc.Function.Name {
+		case "save_dialog_to_notion":
+			title, ok := tc.Function.Arguments["title"].(string)
+			if !ok || title == "" {
+				b.sendMessage(chatID, "❌ Ошибка: не указано название страницы")
+				continue
+			}
+
+			// Собираем контекст диалога
+			history := b.history.Get(userID)
+			if len(history) == 0 {
+				b.sendMessage(chatID, "История диалога пуста, нечего сохранять.")
+				continue
+			}
+
+			// Формируем содержимое страницы
+			var content strings.Builder
+			for _, msg := range history {
+				if msg.Role == "user" {
+					content.WriteString(fmt.Sprintf("**Пользователь:** %s\n\n", msg.Content))
+				} else if msg.Role == "assistant" {
+					content.WriteString(fmt.Sprintf("**Ассистент:** %s\n\n", msg.Content))
+				}
+			}
+
+			result := b.mcpClient.CreateDialogSummary(
+				ctx, title, content.String(),
+				fmt.Sprintf("%d", userID),
+				getUsernameFromID(userID), // Нужно будет реализовать
+				"dialog_summary",
+			)
+
+			if result.Success {
+				b.sendMessage(chatID, fmt.Sprintf("✅ Диалог сохранён в Notion под названием '%s'", title))
+			} else {
+				b.sendMessage(chatID, fmt.Sprintf("❌ Ошибка сохранения: %s", result.Message))
+			}
+
+		case "search_notion":
+			query, ok := tc.Function.Arguments["query"].(string)
+			if !ok || query == "" {
+				b.sendMessage(chatID, "❌ Ошибка: не указан поисковый запрос")
+				continue
+			}
+
+			result := b.mcpClient.SearchDialogSummaries(
+				ctx, query,
+				fmt.Sprintf("%d", userID),
+				"dialog_summary",
+			)
+
+			if result.Success {
+				b.sendMessage(chatID, fmt.Sprintf("🔍 Результаты поиска по запросу '%s':\n\n%s", query, result.Message))
+			} else {
+				b.sendMessage(chatID, fmt.Sprintf("❌ Ошибка поиска: %s", result.Message))
+			}
+
+		case "create_notion_page":
+			title, ok := tc.Function.Arguments["title"].(string)
+			if !ok || title == "" {
+				b.sendMessage(chatID, "❌ Ошибка: не указано название страницы")
+				continue
+			}
+
+			content, ok := tc.Function.Arguments["content"].(string)
+			if !ok || content == "" {
+				b.sendMessage(chatID, "❌ Ошибка: не указано содержимое страницы")
+				continue
+			}
+
+			parentPage, _ := tc.Function.Arguments["parent_page"].(string)
+
+			result := b.mcpClient.CreateFreeFormPage(ctx, title, content, parentPage, nil)
+
+			if result.Success {
+				b.sendMessage(chatID, fmt.Sprintf("✅ Страница '%s' создана в Notion", title))
+			} else {
+				b.sendMessage(chatID, fmt.Sprintf("❌ Ошибка создания страницы: %s", result.Message))
+			}
+
+		default:
+			log.Printf("Unknown function call: %s", tc.Function.Name)
+		}
+	}
+}
+
+// getUsernameFromID возвращает имя пользователя по ID (упрощённая версия)
+func getUsernameFromID(userID int64) string {
+	return fmt.Sprintf("user_%d", userID)
+}
