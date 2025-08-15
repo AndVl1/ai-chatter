@@ -21,7 +21,7 @@ Content rules:
 
 
 Output format:
-Always return your response as a valid JSON object with exactly these fields without wrapping it into markdown:
+Always return your response as a valid JSON object with exactly these fields in plain text, strictly without using markdown formatting:
 {
   "title": "Short, clear title in Russian",
   "answer": "Full detailed answer in Russian (no formatting)",

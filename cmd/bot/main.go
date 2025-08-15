@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"log"
 	"os"
 	"strings"
@@ -50,7 +49,8 @@ func main() {
 		model = s
 	}
 
-	llmClient, err := newLLMClientWith(prov, cfg, model)
+	llmFactory := llm.NewFactory(cfg)
+	llmClient, err := llmFactory.CreateClient(prov, model)
 	if err != nil {
 		log.Fatalf("failed to create llm client: %v", err)
 	}
@@ -81,6 +81,7 @@ func main() {
 		cfg.TelegramBotToken,
 		authSvc,
 		llmClient,
+		llmFactory,
 		systemPrompt,
 		rec,
 		cfg.AdminUserID,
@@ -88,12 +89,6 @@ func main() {
 		cfg.MessageParseMode,
 		prov,
 		model,
-		cfg.OpenAIAPIKey,
-		cfg.OpenAIBaseURL,
-		cfg.OpenRouterReferrer,
-		cfg.OpenRouterTitle,
-		cfg.YandexOAuthToken,
-		cfg.YandexFolderID,
 	)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)
@@ -122,13 +117,4 @@ func readTrim(path string) string {
 	return strings.TrimSpace(string(b))
 }
 
-func newLLMClientWith(provider string, cfg *config.Config, model string) (llm.Client, error) {
-	switch provider {
-	case string(config.ProviderOpenAI):
-		return llm.NewOpenAI(cfg.OpenAIAPIKey, cfg.OpenAIBaseURL, model, cfg.OpenRouterReferrer, cfg.OpenRouterTitle), nil
-	case string(config.ProviderYandex):
-		return llm.NewYandex(cfg.YandexOAuthToken, cfg.YandexFolderID)
-	default:
-		return nil, fmt.Errorf("unknown llm provider: %s", provider)
-	}
-}
+

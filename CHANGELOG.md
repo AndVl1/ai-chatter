@@ -67,3 +67,25 @@ All notable changes to this project will be documented in this file.
   - During TZ, after each primary model response, the second model acts as a checker: receives only `answer` and `status`, returns JSON `{ "status": "ok|fail", "msg": "..." }`. On `fail`, the bot auto-corrects the primary response using the first model with the provided `msg` and sends the corrected answer to the user.
 - Logging of checker/correction: persisted `[tz_check]` responses and `[tz_correct_req]` correction intents to the JSONL log (not used in context).
 - Tests: updated and added unit tests for finalization flow, forced finalization at cap, numbered formatting, model2 usage (`/model2`), and checker-based correction.
+
+## [Refactoring - 2025-01-27]
+
+### Refactored
+- **LLM Factory Pattern**: Создана фабрика `llm.Factory` для централизованного создания LLM клиентов, устранено дублирование кода в `main.go`, `bot.go`
+- **Configuration Fix**: Исправлено дублирование env переменной `MODEL_FILE_PATH` для `Model2FilePath`, теперь используется `MODEL2_FILE_PATH`
+- **Bot Structure Cleanup**: Удалены избыточные поля из структуры `Bot` (openaiAPIKey, openaiBaseURL, etc), теперь используется `llmFactory`
+- **Dynamic Model Lists**: Заменен хардкод списка моделей в административных командах на динамическое получение из `llm.AllowedModels`
+- **Improved Error Handling**: Улучшена обработка ошибок при создании LLM клиентов с fallback механизмами
+
+### Technical Improvements
+- Уменьшено количество полей в Bot struct с ~20 до ~15
+- Устранено дублирование логики создания LLM клиентов в 3 местах
+- Централизована конфигурация разрешенных моделей
+- Упрощена поддержка новых LLM провайдеров
+
+### Added
+- **TZ Test Mode**: Автоматический тест-режим для проверки генерации ТЗ (`/tz test <тема>`)
+- **Dual Model Architecture**: Model1 (TZ generator) + Model2 (auto-responder) для реалистичного тестирования
+- **Response Validation**: Проверка формата ответов модели (отсутствие ```json блоков, валидация схемы)
+- **Auto-failure Handling**: Автоматическое завершение при ошибках с очисткой контекста
+- **Test Coverage**: Unit-тесты для валидации и автогенерации ответов

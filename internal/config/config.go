@@ -41,7 +41,7 @@ type Config struct {
 	// Overrides persistence
 	ProviderFilePath string `env:"PROVIDER_FILE_PATH" envDefault:"data/provider.txt"`
 	ModelFilePath    string `env:"MODEL_FILE_PATH" envDefault:"data/model.txt"`
-	Model2FilePath   string `env:"MODEL_FILE_PATH" envDefault:"data/model2.txt"`
+	Model2FilePath   string `env:"MODEL2_FILE_PATH" envDefault:"data/model2.txt"`
 
 	// Formatting
 	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"HTML"`
