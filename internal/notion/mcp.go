@@ -1,417 +1,457 @@
 package notion
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"os"
+	"os/exec"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// MCPClient клиент для работы с официальным Notion MCP сервером
+// MCPClient клиент для работы с кастомным Notion MCP сервером
 type MCPClient struct {
-	httpClient *http.Client
-	baseURL    string
-	sessionID  string
+	client  *mcp.Client
+	session *mcp.ClientSession
 }
 
 // NewMCPClient создает новый MCP клиент для Notion
 func NewMCPClient(token string) *MCPClient {
-	host := os.Getenv("MCP_HOST")
-	baseURL := fmt.Sprintf("http://%s:3000/mcp", host) // Локальный MCP сервер
-
-	// Проверяем переменную окружения для custom URL
-	if customURL := os.Getenv("NOTION_MCP_URL"); customURL != "" {
-		baseURL = customURL
-	}
-
-	return &MCPClient{
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		baseURL: baseURL,
-	}
+	return &MCPClient{}
 }
 
-// Connect подключается к локальному Notion MCP серверу
+// Connect подключается к кастомному Notion MCP серверу через stdio
 func (m *MCPClient) Connect(ctx context.Context, notionToken string) error {
-	log.Printf("🔗 Connecting to local Notion MCP server: %s", m.baseURL)
+	log.Printf("🔗 Connecting to custom Notion MCP server via stdio")
 
-	// Инициализируем MCP сессию
-	initReq := MCPRequest{
-		JSONRPC: "2.0",
-		ID:      1,
-		Method:  "initialize",
-		Params: map[string]interface{}{
-			"protocolVersion": "2024-11-05",
-			"capabilities": map[string]interface{}{
-				"tools": map[string]interface{}{},
-			},
-			"clientInfo": map[string]interface{}{
-				"name":    "ai-chatter-bot",
-				"version": "1.0.0",
-			},
-		},
+	// Создаем MCP клиент
+	m.client = mcp.NewClient(&mcp.Implementation{
+		Name:    "ai-chatter-bot",
+		Version: "1.0.0",
+	}, nil)
+
+	// Запускаем наш кастомный MCP сервер как подпроцесс
+	serverPath := "./notion-mcp-server"
+	if customPath := os.Getenv("NOTION_MCP_SERVER_PATH"); customPath != "" {
+		serverPath = customPath
 	}
 
-	response, err := m.sendMCPRequest(ctx, initReq)
+	cmd := exec.CommandContext(ctx, serverPath)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("NOTION_TOKEN=%s", notionToken))
+
+	transport := mcp.NewCommandTransport(cmd)
+
+	session, err := m.client.Connect(ctx, transport)
 	if err != nil {
-		return fmt.Errorf("failed to initialize MCP session: %w", err)
+		return fmt.Errorf("failed to connect to custom MCP server: %w", err)
 	}
 
-	// Проверяем успешную инициализацию
-	if response.Error != nil {
-		return fmt.Errorf("MCP initialization error: %s", response.Error.Message)
-	}
-
-	log.Printf("✅ Successfully connected to Notion MCP server")
+	m.session = session
+	log.Printf("✅ Connected to custom Notion MCP server")
 	return nil
 }
 
 // Close закрывает соединение с MCP сервером
 func (m *MCPClient) Close() error {
-	// HTTP соединения закрываются автоматически
+	if m.session != nil {
+		return m.session.Close()
+	}
 	return nil
 }
 
-// CreateDialogSummary создает страницу с сохранением диалога через официальный MCP
-func (m *MCPClient) CreateDialogSummary(ctx context.Context, title, content, userID, username, dialogType string) MCPResult {
-	log.Printf("📝 Creating Notion page via MCP: %s", title)
-
-	// Получаем список доступных инструментов
-	toolsReq := MCPRequest{
-		JSONRPC: "2.0",
-		ID:      2,
-		Method:  "tools/list",
-		Params:  map[string]interface{}{},
+// CreateDialogSummary создает страницу с сохранением диалога через кастомный MCP
+func (m *MCPClient) CreateDialogSummary(ctx context.Context, title, content, userID, username, dialogType, parentPageID string) MCPResult {
+	if m.session == nil {
+		return MCPResult{Success: false, Message: "MCP session not connected"}
 	}
 
-	toolsResponse, err := m.sendMCPRequest(ctx, toolsReq)
-	if err != nil {
-		log.Printf("❌ Failed to get tools list: %v", err)
-		return MCPResult{Success: false, Message: fmt.Sprintf("Failed to get tools: %v", err)}
+	log.Printf("📝 Creating Notion page via custom MCP: %s", title)
+
+	// Проверяем обязательный parent_page_id
+	if parentPageID == "" {
+		return MCPResult{Success: false, Message: "parent_page_id is required - get it from your Notion workspace"}
 	}
 
-	log.Printf("📋 Available tools: %+v", toolsResponse.Result)
-
-	// Вызываем инструмент создания страницы
-	createReq := MCPRequest{
-		JSONRPC: "2.0",
-		ID:      3,
-		Method:  "tools/call",
-		Params: map[string]interface{}{
-			"name": "create_page",
-			"arguments": map[string]interface{}{
-				"title":   title,
-				"content": formatDialogContent(title, content, userID, username, dialogType),
-				"properties": map[string]interface{}{
-					"Type":       "Dialog",
-					"User":       username,
-					"UserID":     userID,
-					"Created":    time.Now().Format("2006-01-02"),
-					"DialogType": dialogType,
-				},
-			},
+	// Вызываем инструмент save_dialog_to_notion
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "save_dialog_to_notion",
+		Arguments: map[string]any{
+			"title":          title,
+			"content":        content,
+			"user_id":        userID,
+			"username":       username,
+			"dialog_type":    dialogType,
+			"parent_page_id": parentPageID,
 		},
-	}
+	})
 
-	response, err := m.sendMCPRequest(ctx, createReq)
 	if err != nil {
-		log.Printf("❌ MCP create_page error: %v", err)
+		log.Printf("❌ MCP save_dialog error: %v", err)
 		return MCPResult{Success: false, Message: fmt.Sprintf("MCP error: %v", err)}
 	}
 
-	if response.Error != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("MCP tool error: %s", response.Error.Message)}
+	if result.IsError {
+		return MCPResult{Success: false, Message: "Tool returned error"}
 	}
 
-	return m.parseToolResult(response.Result, "Dialog saved successfully to Notion")
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	var pageID string
+	if result.Meta != nil {
+		if id, ok := result.Meta["page_id"].(string); ok {
+			pageID = id
+		}
+	}
+
+	return MCPResult{
+		Success: true,
+		Message: responseText,
+		PageID:  pageID,
+		Data:    formatResultMeta(result.Meta),
+	}
 }
 
-// SearchDialogSummaries ищет сохраненные диалоги через официальный MCP
+// SearchDialogSummaries ищет сохраненные диалоги через кастомный MCP
 func (m *MCPClient) SearchDialogSummaries(ctx context.Context, query, userID, dialogType string) MCPResult {
-	log.Printf("🔍 Searching Notion via MCP: query='%s'", query)
-
-	searchReq := MCPRequest{
-		JSONRPC: "2.0",
-		ID:      4,
-		Method:  "tools/call",
-		Params: map[string]interface{}{
-			"name": "search",
-			"arguments": map[string]interface{}{
-				"query": query,
-				"filter": map[string]interface{}{
-					"property": "Type",
-					"select": map[string]interface{}{
-						"equals": "Dialog",
-					},
-				},
-				"page_size": 20,
-			},
-		},
+	if m.session == nil {
+		return MCPResult{Success: false, Message: "MCP session not connected"}
 	}
 
-	response, err := m.sendMCPRequest(ctx, searchReq)
+	log.Printf("🔍 Searching Notion via custom MCP: query='%s'", query)
+
+	// Вызываем инструмент search_pages
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "search_pages",
+		Arguments: map[string]any{
+			"query": query,
+			"filter": map[string]any{
+				"property": "Type",
+				"select": map[string]any{
+					"equals": "Dialog",
+				},
+			},
+			"page_size": 20,
+		},
+	})
+
 	if err != nil {
 		log.Printf("❌ MCP search error: %v", err)
 		return MCPResult{Success: false, Message: fmt.Sprintf("MCP search error: %v", err)}
 	}
 
-	if response.Error != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("MCP search error: %s", response.Error.Message)}
+	if result.IsError {
+		return MCPResult{Success: false, Message: "Tool returned error"}
 	}
 
-	return m.parseSearchResult(response.Result, query)
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	return MCPResult{
+		Success: true,
+		Message: responseText,
+		Data:    formatResultMeta(result.Meta),
+	}
 }
 
-// CreateFreeFormPage создает произвольную страницу через официальный MCP
-func (m *MCPClient) CreateFreeFormPage(ctx context.Context, title, content, parentPageName string, tags []string) MCPResult {
-	log.Printf("📄 Creating free-form page via MCP: %s", title)
+// CreateFreeFormPage создает произвольную страницу через кастомный MCP
+func (m *MCPClient) CreateFreeFormPage(ctx context.Context, title, content, parentPageId string, tags []string) MCPResult {
+	if m.session == nil {
+		return MCPResult{Success: false, Message: "MCP session not connected"}
+	}
 
-	toolParams := map[string]interface{}{
+	log.Printf("📄 Creating free-form page via custom MCP: %s", title)
+
+	// Вызываем инструмент create_page
+	args := map[string]any{
 		"title":   title,
 		"content": content,
-		"properties": map[string]interface{}{
+		"properties": map[string]any{
 			"Type":    "Free-form",
 			"Created": time.Now().Format("2006-01-02"),
 		},
 	}
 
-	// Добавляем parent если указан
-	if parentPageName != "" {
-		toolParams["parent"] = map[string]interface{}{
-			"type":      "page_name",
-			"page_name": parentPageName,
-		}
+	if parentPageId == "" {
+		return MCPResult{Success: false, Message: "parent_page_id is required - get it from your Notion workspace"}
 	}
 
-	// Добавляем теги если указаны
+	args["parent_page_id"] = parentPageId
+
 	if len(tags) > 0 {
-		toolParams["properties"].(map[string]interface{})["Tags"] = tags
+		args["properties"].(map[string]any)["Tags"] = tags
 	}
 
-	createReq := MCPRequest{
-		JSONRPC: "2.0",
-		ID:      5,
-		Method:  "tools/call",
-		Params: map[string]interface{}{
-			"name":      "create_page",
-			"arguments": toolParams,
-		},
-	}
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "create_page",
+		Arguments: args,
+	})
 
-	response, err := m.sendMCPRequest(ctx, createReq)
 	if err != nil {
 		return MCPResult{Success: false, Message: fmt.Sprintf("MCP error: %v", err)}
 	}
 
-	if response.Error != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("MCP tool error: %s", response.Error.Message)}
+	if result.IsError {
+		return MCPResult{Success: false, Message: fmt.Sprintf("Tool returned error: %v", result.Content)}
 	}
 
-	return m.parseToolResult(response.Result, "Free-form page created successfully")
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	var pageID string
+	if result.Meta != nil {
+		if id, ok := result.Meta["page_id"].(string); ok {
+			pageID = id
+		}
+	}
+
+	return MCPResult{
+		Success: true,
+		Message: responseText,
+		PageID:  pageID,
+		Data:    formatResultMeta(result.Meta),
+	}
 }
 
-// SearchWorkspace выполняет поиск по workspace через официальный MCP
+// SearchWorkspace выполняет поиск по workspace через кастомный MCP
 func (m *MCPClient) SearchWorkspace(ctx context.Context, query, pageType string, tags []string) MCPResult {
-	toolParams := map[string]interface{}{
+	if m.session == nil {
+		return MCPResult{Success: false, Message: "MCP session not connected"}
+	}
+
+	args := map[string]any{
 		"query":     query,
 		"page_size": 50,
 	}
 
 	// Добавляем фильтр по типу если указан
 	if pageType != "" {
-		toolParams["filter"] = map[string]interface{}{
+		args["filter"] = map[string]any{
 			"property": "Type",
-			"select": map[string]interface{}{
+			"select": map[string]any{
 				"equals": pageType,
 			},
 		}
 	}
 
-	searchReq := MCPRequest{
-		JSONRPC: "2.0",
-		ID:      6,
-		Method:  "tools/call",
-		Params: map[string]interface{}{
-			"name":      "search",
-			"arguments": toolParams,
-		},
-	}
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_pages",
+		Arguments: args,
+	})
 
-	response, err := m.sendMCPRequest(ctx, searchReq)
 	if err != nil {
 		return MCPResult{Success: false, Message: fmt.Sprintf("MCP search error: %v", err)}
 	}
 
-	if response.Error != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("MCP search error: %s", response.Error.Message)}
+	if result.IsError {
+		return MCPResult{Success: false, Message: "Tool returned error"}
 	}
 
-	return m.parseSearchResult(response.Result, query)
-}
-
-// sendMCPRequest отправляет JSON-RPC запрос к MCP серверу
-func (m *MCPClient) sendMCPRequest(ctx context.Context, req MCPRequest) (*MCPResponse, error) {
-	reqJSON, err := json.Marshal(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal request: %w", err)
-	}
-
-	log.Printf("🔄 MCP Request: %s", string(reqJSON))
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", m.baseURL, bytes.NewReader(reqJSON))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "application/json")
-
-	resp, err := m.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP error %d: %s", resp.StatusCode, string(body))
-	}
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
-	}
-
-	log.Printf("🔄 MCP Response: %s", string(respBody))
-
-	var mcpResp MCPResponse
-	if err := json.Unmarshal(respBody, &mcpResp); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return &mcpResp, nil
-}
-
-// formatDialogContent форматирует содержимое диалога для Notion
-func formatDialogContent(title, content, userID, username, dialogType string) string {
-	return fmt.Sprintf(`# %s
-
-**Пользователь:** %s (%s)  
-**Тип:** %s  
-**Создано:** %s
-
----
-
-%s`, title, username, userID, dialogType, time.Now().Format("2006-01-02 15:04:05"), content)
-}
-
-// parseToolResult парсит результат вызова MCP инструмента
-func (m *MCPClient) parseToolResult(result interface{}, successMessage string) MCPResult {
-	resultJSON, err := json.Marshal(result)
-	if err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("Failed to parse result: %v", err)}
-	}
-
-	var parsedResult map[string]interface{}
-	if err := json.Unmarshal(resultJSON, &parsedResult); err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("Failed to unmarshal result: %v", err)}
-	}
-
-	// Извлекаем информацию о странице
-	var pageID, pageURL string
-	if content, ok := parsedResult["content"].([]interface{}); ok && len(content) > 0 {
-		if textContent, ok := content[0].(map[string]interface{}); ok {
-			if text, ok := textContent["text"].(string); ok {
-				successMessage = text
-			}
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
 		}
-	}
-
-	if id, ok := parsedResult["id"].(string); ok {
-		pageID = id
-	}
-	if url, ok := parsedResult["url"].(string); ok {
-		pageURL = url
-	}
-
-	// Создаем данные для ответа
-	data := map[string]interface{}{
-		"page_id": pageID,
-		"url":     pageURL,
-		"result":  parsedResult,
-	}
-	dataJSON, _ := json.Marshal(data)
-
-	return MCPResult{
-		Success: true,
-		Message: successMessage,
-		PageID:  pageID,
-		Data:    string(dataJSON),
-	}
-}
-
-// parseSearchResult парсит результат поиска
-func (m *MCPClient) parseSearchResult(result interface{}, query string) MCPResult {
-	resultJSON, err := json.Marshal(result)
-	if err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("Failed to parse search result: %v", err)}
-	}
-
-	var searchResult map[string]interface{}
-	if err := json.Unmarshal(resultJSON, &searchResult); err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("Failed to unmarshal search result: %v", err)}
-	}
-
-	// Попробуем извлечь результаты из content
-	var message string
-	if content, ok := searchResult["content"].([]interface{}); ok && len(content) > 0 {
-		if textContent, ok := content[0].(map[string]interface{}); ok {
-			if text, ok := textContent["text"].(string); ok {
-				message = text
-			}
-		}
-	}
-
-	if message == "" {
-		message = fmt.Sprintf("Поиск выполнен для запроса '%s'", query)
 	}
 
 	return MCPResult{
 		Success: true,
-		Message: message,
-		Data:    string(resultJSON),
+		Message: responseText,
+		Data:    formatResultMeta(result.Meta),
 	}
 }
 
-// MCP структуры для JSON-RPC протокола
+// SearchPagesWithID ищет страницы в Notion и возвращает их ID, название и URL
+func (m *MCPClient) SearchPagesWithID(ctx context.Context, query string, limit int, exactMatch bool) MCPPageSearchResult {
+	if m.session == nil {
+		return MCPPageSearchResult{Success: false, Message: "MCP session not connected"}
+	}
 
-// MCPRequest представляет JSON-RPC запрос к MCP серверу
-type MCPRequest struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      int         `json:"id"`
-	Method  string      `json:"method"`
-	Params  interface{} `json:"params"`
+	args := map[string]any{
+		"query": query,
+	}
+
+	if limit > 0 {
+		args["limit"] = limit
+	}
+
+	if exactMatch {
+		args["exact_match"] = exactMatch
+	}
+
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_pages_with_id",
+		Arguments: args,
+	})
+
+	if err != nil {
+		return MCPPageSearchResult{Success: false, Message: fmt.Sprintf("MCP search error: %v", err)}
+	}
+
+	if result.IsError {
+		return MCPPageSearchResult{Success: false, Message: "Tool returned error"}
+	}
+
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	// Извлекаем метаданные с результатами
+	var pages []MCPPageResult
+	var totalFound int
+
+	if result.Meta != nil {
+		// Извлекаем total_found
+		if count, ok := result.Meta["total_found"].(float64); ok {
+			totalFound = int(count)
+		}
+
+		// Извлекаем результаты
+		if resultsData, ok := result.Meta["results"].([]any); ok {
+			for _, item := range resultsData {
+				if pageData, ok := item.(map[string]any); ok {
+					page := MCPPageResult{}
+					if id, ok := pageData["id"].(string); ok {
+						page.ID = id
+					}
+					if title, ok := pageData["title"].(string); ok {
+						page.Title = title
+					}
+					if url, ok := pageData["url"].(string); ok {
+						page.URL = url
+					}
+					pages = append(pages, page)
+				}
+			}
+		}
+	}
+
+	return MCPPageSearchResult{
+		Success:    true,
+		Message:    responseText,
+		Pages:      pages,
+		TotalFound: totalFound,
+	}
 }
 
-// MCPResponse представляет JSON-RPC ответ от MCP сервера
-type MCPResponse struct {
-	JSONRPC string      `json:"jsonrpc"`
-	ID      int         `json:"id"`
-	Result  interface{} `json:"result,omitempty"`
-	Error   *MCPError   `json:"error,omitempty"`
+// ListAvailablePages получает список доступных страниц в Notion workspace
+func (m *MCPClient) ListAvailablePages(ctx context.Context, limit int, pageType string, parentOnly bool) MCPAvailablePagesResult {
+	if m.session == nil {
+		return MCPAvailablePagesResult{Success: false, Message: "MCP session not connected"}
+	}
+
+	args := map[string]any{}
+
+	if limit > 0 {
+		args["limit"] = limit
+	}
+
+	if pageType != "" {
+		args["page_type"] = pageType
+	}
+
+	if parentOnly {
+		args["parent_only"] = parentOnly
+	}
+
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "list_available_pages",
+		Arguments: args,
+	})
+
+	if err != nil {
+		return MCPAvailablePagesResult{Success: false, Message: fmt.Sprintf("MCP list pages error: %v", err)}
+	}
+
+	if result.IsError {
+		return MCPAvailablePagesResult{Success: false, Message: "Tool returned error"}
+	}
+
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	// Извлекаем метаданные с результатами
+	var pages []MCPAvailablePageResult
+	var totalFound int
+
+	if result.Meta != nil {
+		// Извлекаем total_found
+		if count, ok := result.Meta["total_found"].(float64); ok {
+			totalFound = int(count)
+		}
+
+		// Извлекаем результаты
+		if pagesData, ok := result.Meta["pages"].([]any); ok {
+			for _, item := range pagesData {
+				if pageData, ok := item.(map[string]any); ok {
+					page := MCPAvailablePageResult{}
+					if id, ok := pageData["id"].(string); ok {
+						page.ID = id
+					}
+					if title, ok := pageData["title"].(string); ok {
+						page.Title = title
+					}
+					if url, ok := pageData["url"].(string); ok {
+						page.URL = url
+					}
+					if canBeParent, ok := pageData["can_be_parent"].(bool); ok {
+						page.CanBeParent = canBeParent
+					}
+					if pageType, ok := pageData["type"].(string); ok {
+						page.Type = pageType
+					}
+					pages = append(pages, page)
+				}
+			}
+		}
+	}
+
+	return MCPAvailablePagesResult{
+		Success:    true,
+		Message:    responseText,
+		Pages:      pages,
+		TotalFound: totalFound,
+	}
 }
 
-// MCPError представляет ошибку в MCP протоколе
-type MCPError struct {
-	Code    int         `json:"code"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data,omitempty"`
+// formatResultMeta форматирует метаданные результата в JSON строку
+func formatResultMeta(meta any) string {
+	if meta == nil {
+		return ""
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // MCPResult представляет результат MCP вызова
@@ -447,4 +487,36 @@ type MCPSearchItem struct {
 	Highlight string `json:"highlight"`
 	Timestamp string `json:"timestamp"`
 	ID        string `json:"id"`
+}
+
+// MCPPageSearchResult результат поиска страниц с ID
+type MCPPageSearchResult struct {
+	Success    bool            `json:"success"`
+	Message    string          `json:"message"`
+	Pages      []MCPPageResult `json:"pages"`
+	TotalFound int             `json:"total_found"`
+}
+
+// MCPPageResult информация о найденной странице
+type MCPPageResult struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+// MCPAvailablePagesResult результат получения списка доступных страниц
+type MCPAvailablePagesResult struct {
+	Success    bool                     `json:"success"`
+	Message    string                   `json:"message"`
+	Pages      []MCPAvailablePageResult `json:"pages"`
+	TotalFound int                      `json:"total_found"`
+}
+
+// MCPAvailablePageResult информация о доступной странице
+type MCPAvailablePageResult struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	CanBeParent bool   `json:"can_be_parent"`
+	Type        string `json:"type,omitempty"`
 }
