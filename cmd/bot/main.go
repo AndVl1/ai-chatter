@@ -11,6 +11,7 @@ import (
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/config"
 	"ai-chatter/internal/llm"
+	"ai-chatter/internal/notion"
 	"ai-chatter/internal/pending"
 	"ai-chatter/internal/storage"
 	"ai-chatter/internal/telegram"
@@ -77,6 +78,24 @@ func main() {
 		}
 	}
 
+	// Initialize Notion MCP client
+	var mcpClient *notion.MCPClient
+	if cfg.NotionToken != "" {
+		mcpClient = notion.NewMCPClient(cfg.NotionToken)
+
+		// Подключаемся к MCP серверу
+		ctx := context.Background()
+		if err := mcpClient.Connect(ctx, cfg.NotionToken); err != nil {
+			log.Printf("⚠️ Failed to connect to Notion MCP server: %v", err)
+			log.Printf("Notion functionality will be disabled")
+			mcpClient = nil
+		} else {
+			log.Printf("✅ Notion MCP client connected successfully")
+		}
+	} else {
+		log.Printf("NOTION_TOKEN not set, Notion functionality disabled")
+	}
+
 	bot, err := telegram.New(
 		cfg.TelegramBotToken,
 		authSvc,
@@ -89,6 +108,7 @@ func main() {
 		cfg.MessageParseMode,
 		prov,
 		model,
+		mcpClient,
 	)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)
@@ -116,5 +136,3 @@ func readTrim(path string) string {
 	}
 	return strings.TrimSpace(string(b))
 }
-
-

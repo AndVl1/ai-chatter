@@ -45,6 +45,9 @@ type Config struct {
 
 	// Formatting
 	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"HTML"`
+
+	// Notion integration
+	NotionToken string `env:"NOTION_TOKEN"`
 }
 
 func New() *Config {

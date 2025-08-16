@@ -36,6 +36,12 @@ func NewYandex(oauthToken, folderID string) (*YandexClient, error) {
 }
 
 func (c *YandexClient) Generate(ctx context.Context, messages []Message) (Response, error) {
+	return c.GenerateWithTools(ctx, messages, nil)
+}
+
+func (c *YandexClient) GenerateWithTools(ctx context.Context, messages []Message, tools []Tool) (Response, error) {
+	// YandexGPT пока не поддерживает function calling
+	// Игнорируем tools и делаем обычный запрос
 	var yaMsgs []yagpt.Message
 	for _, m := range messages {
 		yaMsgs = append(yaMsgs, yagpt.Message{Role: m.Role, Content: m.Content})
@@ -52,5 +58,7 @@ func (c *YandexClient) Generate(ctx context.Context, messages []Message) (Respon
 	out.PromptTokens = int(resp.Usage.InputTextTokens)
 	out.CompletionTokens = int(resp.Usage.CompletionTokens)
 	out.TotalTokens = int(resp.Usage.TotalTokens)
+	// YandexGPT не поддерживает tool calls
+	out.ToolCalls = nil
 	return out, nil
 }

@@ -20,6 +20,15 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.handleAdminConfigCommands(msg)
 		return
 	}
+	// Notion commands
+	if msg.Command() == "notion_save" {
+		b.handleNotionSave(msg)
+		return
+	}
+	if msg.Command() == "notion_search" {
+		b.handleNotionSearch(msg)
+		return
+	}
 	if msg.Command() == "tz" {
 		if !b.authSvc.IsAllowed(msg.From.ID) {
 			return
@@ -166,7 +175,17 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 		}
 	}
 	b.logLLMRequest(msg.From.ID, "chat", contextMsgs)
-	resp, err := b.getLLMClient().Generate(ctx, contextMsgs)
+
+	// Используем инструменты Notion только если клиент настроен и не в режиме ТЗ
+	var resp llm.Response
+	var err error
+	if b.mcpClient != nil && !b.isTZMode(msg.From.ID) {
+		tools := llm.GetNotionTools()
+		resp, err = b.getLLMClient().GenerateWithTools(ctx, contextMsgs, tools)
+	} else {
+		resp, err = b.getLLMClient().Generate(ctx, contextMsgs)
+	}
+
 	if err != nil {
 		b.sendMessage(msg.Chat.ID, "Sorry, something went wrong.")
 		return
@@ -272,4 +291,87 @@ func (b *Bot) handleSummary(ctx context.Context, cb *tgbotapi.CallbackQuery) {
 	m.ParseMode = b.parseModeValue()
 	m.ReplyMarkup = b.menuKeyboard()
 	_, _ = b.s.Send(m)
+}
+
+// handleNotionSave сохраняет диалог в Notion
+func (b *Bot) handleNotionSave(msg *tgbotapi.Message) {
+	if !b.authSvc.IsAllowed(msg.From.ID) {
+		return
+	}
+
+	if b.mcpClient == nil {
+		b.sendMessage(msg.Chat.ID, "Notion интеграция не настроена. Установите NOTION_TOKEN в конфигурации.")
+		return
+	}
+
+	args := strings.TrimSpace(msg.CommandArguments())
+	if args == "" {
+		b.sendMessage(msg.Chat.ID, "Использование: /notion_save <название страницы>")
+		return
+	}
+
+	// Собираем контекст диалога
+	history := b.history.Get(msg.From.ID)
+	if len(history) == 0 {
+		b.sendMessage(msg.Chat.ID, "История диалога пуста, нечего сохранять.")
+		return
+	}
+
+	// Формируем содержимое страницы
+	var content strings.Builder
+	for _, msg := range history {
+		if msg.Role == "user" {
+			content.WriteString(fmt.Sprintf("**Пользователь:** %s\n\n", msg.Content))
+		} else if msg.Role == "assistant" {
+			content.WriteString(fmt.Sprintf("**Ассистент:** %s\n\n", msg.Content))
+		}
+	}
+
+	ctx := context.Background()
+	result := b.mcpClient.CreateDialogSummary(
+		ctx,
+		args, // title
+		content.String(),
+		fmt.Sprintf("%d", msg.From.ID),
+		msg.From.UserName,
+		"dialog_summary",
+	)
+
+	if result.Success {
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("✅ Диалог успешно сохранен в Notion!\n\n%s", result.Message))
+	} else {
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("❌ Ошибка сохранения в Notion: %s", result.Message))
+	}
+}
+
+// handleNotionSearch ищет в Notion
+func (b *Bot) handleNotionSearch(msg *tgbotapi.Message) {
+	if !b.authSvc.IsAllowed(msg.From.ID) {
+		return
+	}
+
+	if b.mcpClient == nil {
+		b.sendMessage(msg.Chat.ID, "Notion интеграция не настроена. Установите NOTION_TOKEN в конфигурации.")
+		return
+	}
+
+	args := strings.TrimSpace(msg.CommandArguments())
+	if args == "" {
+		b.sendMessage(msg.Chat.ID, "Использование: /notion_search <поисковый запрос>")
+		return
+	}
+
+	ctx := context.Background()
+	result := b.mcpClient.SearchDialogSummaries(
+		ctx,
+		args,
+		fmt.Sprintf("%d", msg.From.ID),
+		"dialog_summary",
+	)
+
+	if result.Success {
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("🔍 Результаты поиска в Notion:\n\n%s", result.Message))
+	} else {
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("❌ Ошибка поиска в Notion: %s", result.Message))
+	}
 }
