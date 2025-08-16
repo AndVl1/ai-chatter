@@ -379,19 +379,31 @@ func (b *Bot) handleFunctionCalls(ctx context.Context, chatID, userID int64, too
 		return
 	}
 
+	// Собираем результаты всех tool calls
+	toolResults := make([]llm.ToolCallResult, 0, len(toolCalls))
+
 	for _, tc := range toolCalls {
 		switch tc.Function.Name {
 		case "save_dialog_to_notion":
+			// Отправляем уведомление о начале операции
+			b.sendMessage(chatID, "💾 Сохраняю диалог в Notion...")
+
 			title, ok := tc.Function.Arguments["title"].(string)
 			if !ok || title == "" {
-				b.sendMessage(chatID, "❌ Ошибка: не указано название страницы")
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    "Ошибка: не указано название страницы",
+				})
 				continue
 			}
 
 			// Собираем контекст диалога
 			history := b.history.Get(userID)
 			if len(history) == 0 {
-				b.sendMessage(chatID, "История диалога пуста, нечего сохранять.")
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    "Ошибка: история диалога пуста",
+				})
 				continue
 			}
 
@@ -405,23 +417,45 @@ func (b *Bot) handleFunctionCalls(ctx context.Context, chatID, userID int64, too
 				}
 			}
 
+			// Проверяем настройку parent page
+			if b.notionParentPage == "" {
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    "Ошибка: не настроен NOTION_PARENT_PAGE_ID",
+				})
+				continue
+			}
+
 			result := b.mcpClient.CreateDialogSummary(
 				ctx, title, content.String(),
 				fmt.Sprintf("%d", userID),
-				getUsernameFromID(userID), // Нужно будет реализовать
+				getUsernameFromID(userID),
 				"dialog_summary",
+				b.notionParentPage,
 			)
 
 			if result.Success {
-				b.sendMessage(chatID, fmt.Sprintf("✅ Диалог сохранён в Notion под названием '%s'", title))
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("Диалог успешно сохранён в Notion под названием '%s'. Page ID: %s", title, result.PageID),
+				})
 			} else {
-				b.sendMessage(chatID, fmt.Sprintf("❌ Ошибка сохранения: %s", result.Message))
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("Ошибка сохранения: %s", result.Message),
+				})
 			}
 
 		case "search_notion":
+			// Отправляем уведомление о начале поиска
+			b.sendMessage(chatID, "🔍 Ищу в Notion...")
+
 			query, ok := tc.Function.Arguments["query"].(string)
 			if !ok || query == "" {
-				b.sendMessage(chatID, "❌ Ошибка: не указан поисковый запрос")
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    "Ошибка: не указан поисковый запрос",
+				})
 				continue
 			}
 
@@ -432,38 +466,216 @@ func (b *Bot) handleFunctionCalls(ctx context.Context, chatID, userID int64, too
 			)
 
 			if result.Success {
-				b.sendMessage(chatID, fmt.Sprintf("🔍 Результаты поиска по запросу '%s':\n\n%s", query, result.Message))
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("Результаты поиска по запросу '%s': %s", query, result.Message),
+				})
 			} else {
-				b.sendMessage(chatID, fmt.Sprintf("❌ Ошибка поиска: %s", result.Message))
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("Ошибка поиска: %s", result.Message),
+				})
 			}
 
 		case "create_notion_page":
+			// Отправляем уведомление о начале создания
+			b.sendMessage(chatID, "📝 Создаю страницу в Notion...")
+
 			title, ok := tc.Function.Arguments["title"].(string)
 			if !ok || title == "" {
-				b.sendMessage(chatID, "❌ Ошибка: не указано название страницы")
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    "Ошибка: не указано название страницы",
+				})
 				continue
 			}
 
 			content, ok := tc.Function.Arguments["content"].(string)
 			if !ok || content == "" {
-				b.sendMessage(chatID, "❌ Ошибка: не указано содержимое страницы")
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    "Ошибка: не указано содержимое страницы",
+				})
 				continue
 			}
 
+			// Поддерживаем и старый parent_page и новый parent_page_id
 			parentPage, _ := tc.Function.Arguments["parent_page"].(string)
+			parentPageID, _ := tc.Function.Arguments["parent_page_id"].(string)
+
+			// Приоритет у parent_page_id
+			if parentPageID != "" {
+				parentPage = parentPageID
+			} else if parentPage == "" {
+				// Если не указан ни parent_page, ни parent_page_id, используем default
+				if b.notionParentPage == "" {
+					toolResults = append(toolResults, llm.ToolCallResult{
+						ToolCallID: tc.ID,
+						Content:    "Ошибка: не настроен NOTION_PARENT_PAGE_ID",
+					})
+					continue
+				}
+				parentPage = b.notionParentPage
+			}
 
 			result := b.mcpClient.CreateFreeFormPage(ctx, title, content, parentPage, nil)
 
 			if result.Success {
-				b.sendMessage(chatID, fmt.Sprintf("✅ Страница '%s' создана в Notion", title))
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("Страница '%s' успешно создана в Notion. Page ID: %s", title, result.PageID),
+				})
 			} else {
-				b.sendMessage(chatID, fmt.Sprintf("❌ Ошибка создания страницы: %s", result.Message))
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("Ошибка создания страницы: %s", result.Message),
+				})
+			}
+
+		case "search_pages_with_id":
+			// Отправляем уведомление о начале поиска страниц
+			b.sendMessage(chatID, "🔍 Ищу страницы в Notion...")
+
+			query, ok := tc.Function.Arguments["query"].(string)
+			if !ok || query == "" {
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    "Ошибка: не указан поисковый запрос",
+				})
+				continue
+			}
+
+			// Извлекаем параметры
+			var limit int
+			if limitVal, ok := tc.Function.Arguments["limit"].(float64); ok {
+				limit = int(limitVal)
+			}
+
+			exactMatch := false
+			if exactVal, ok := tc.Function.Arguments["exact_match"].(bool); ok {
+				exactMatch = exactVal
+			}
+
+			result := b.mcpClient.SearchPagesWithID(ctx, query, limit, exactMatch)
+
+			if result.Success {
+				if len(result.Pages) == 0 {
+					toolResults = append(toolResults, llm.ToolCallResult{
+						ToolCallID: tc.ID,
+						Content:    fmt.Sprintf("Страницы по запросу '%s' не найдены", query),
+					})
+				} else {
+					responseText := fmt.Sprintf("Найдено %d страниц по запросу '%s':", len(result.Pages), query)
+					for i, page := range result.Pages {
+						responseText += fmt.Sprintf("\n%d. %s (ID: %s)", i+1, page.Title, page.ID)
+					}
+					toolResults = append(toolResults, llm.ToolCallResult{
+						ToolCallID: tc.ID,
+						Content:    responseText,
+					})
+				}
+			} else {
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("Ошибка поиска страниц: %s", result.Message),
+				})
+			}
+
+		case "list_available_pages":
+			// Отправляем уведомление о получении списка страниц
+			b.sendMessage(chatID, "📋 Получаю список доступных страниц...")
+
+			// Извлекаем параметры
+			var limit int
+			if limitVal, ok := tc.Function.Arguments["limit"].(float64); ok {
+				limit = int(limitVal)
+			}
+
+			pageType := ""
+			if typeVal, ok := tc.Function.Arguments["page_type"].(string); ok {
+				pageType = typeVal
+			}
+
+			parentOnly := false
+			if parentVal, ok := tc.Function.Arguments["parent_only"].(bool); ok {
+				parentOnly = parentVal
+			}
+
+			result := b.mcpClient.ListAvailablePages(ctx, limit, pageType, parentOnly)
+
+			if result.Success {
+				if len(result.Pages) == 0 {
+					toolResults = append(toolResults, llm.ToolCallResult{
+						ToolCallID: tc.ID,
+						Content:    "📋 Доступные страницы не найдены",
+					})
+				} else {
+					responseText := fmt.Sprintf("📋 Найдено %d доступных страниц:", len(result.Pages))
+					for i, page := range result.Pages {
+						responseText += fmt.Sprintf("\n%d. %s (ID: %s)", i+1, page.Title, page.ID)
+						if page.CanBeParent {
+							responseText += " ✅"
+						}
+					}
+					toolResults = append(toolResults, llm.ToolCallResult{
+						ToolCallID: tc.ID,
+						Content:    responseText,
+					})
+				}
+			} else {
+				toolResults = append(toolResults, llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("Ошибка получения списка страниц: %s", result.Message),
+				})
 			}
 
 		default:
+			toolResults = append(toolResults, llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    fmt.Sprintf("Неизвестная функция: %s", tc.Function.Name),
+			})
 			log.Printf("Unknown function call: %s", tc.Function.Name)
 		}
 	}
+
+	// Теперь отправляем результаты обратно в LLM для формирования ответа
+	if len(toolResults) > 0 {
+		b.continueConversationWithToolResults(ctx, chatID, userID, toolResults)
+	}
+}
+
+// continueConversationWithToolResults продолжает диалог с результатами tool calls
+func (b *Bot) continueConversationWithToolResults(ctx context.Context, chatID, userID int64, toolResults []llm.ToolCallResult) {
+	// Получаем текущий контекст
+	contextMsgs := b.buildContextWithOverflow(ctx, userID)
+
+	// Добавляем результаты tool calls
+	for _, result := range toolResults {
+		contextMsgs = append(contextMsgs, llm.Message{
+			Role:       "tool",
+			Content:    result.Content,
+			ToolCallID: result.ToolCallID,
+		})
+	}
+
+	// Добавляем инструкцию для LLM
+	contextMsgs = append(contextMsgs, llm.Message{
+		Role:    "system",
+		Content: "Проанализируй результаты выполненных действий и сформулируй краткий ответ пользователю. Сообщи о статусе выполнения, но не дублируй всю техническую информацию.",
+	})
+
+	b.logLLMRequest(userID, "tool_response", contextMsgs)
+
+	// Получаем ответ от LLM с tools (как в обычных запросах)
+	tools := llm.GetNotionTools()
+	resp, err := b.getLLMClient().GenerateWithTools(ctx, contextMsgs, tools)
+	if err != nil {
+		b.sendMessage(chatID, fmt.Sprintf("Действия выполнены, но произошла ошибка формирования ответа :%v", err))
+		return
+	}
+
+	// Обрабатываем ответ как обычно
+	b.processLLMAndRespond(ctx, chatID, userID, resp)
 }
 
 // getUsernameFromID возвращает имя пользователя по ID (упрощённая версия)

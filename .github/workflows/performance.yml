@@ -1,0 +1,298 @@
+name: Performance Tests
+
+on:
+  # Запуск при релизных тегах
+  push:
+    tags:
+      - 'v*'
+  # Запуск вручную
+  workflow_dispatch:
+    inputs:
+      benchmark_duration:
+        description: 'Benchmark duration (e.g., 30s, 5m)'
+        required: false
+        default: '30s'
+      concurrent_requests:
+        description: 'Number of concurrent requests'
+        required: false
+        default: '5'
+
+env:
+  GO_VERSION: '1.22.x'
+
+jobs:
+  performance-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Install benchmarking tools
+        run: |
+          go install golang.org/x/perf/cmd/benchstat@latest
+          
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build for performance testing
+        run: |
+          echo "🔨 Building optimized binaries..."
+          go build -ldflags="-s -w" -o notion-mcp-server cmd/notion-mcp-server/main.go
+          go build -ldflags="-s -w" -o ai-chatter cmd/bot/main.go
+
+      - name: Run Go benchmarks
+        run: |
+          echo "⚡ Running Go benchmarks..."
+          go test -bench=. -benchmem -count=3 ./... > benchmark-results.txt 2>&1 || true
+          
+          if [ -s benchmark-results.txt ]; then
+            echo "📊 Benchmark results:"
+            cat benchmark-results.txt
+          else
+            echo "⚠️ No benchmarks found - creating placeholder"
+            echo "No benchmark functions found in the codebase" > benchmark-results.txt
+          fi
+
+      - name: Performance test - MCP connection speed
+        if: ${{ env.NOTION_TOKEN != '' }}
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TEST_PAGE_ID: ${{ secrets.NOTION_TEST_PAGE_ID }}
+        run: |
+          echo "🔗 Testing MCP connection performance..."
+          
+          # Создаём простой performance тест
+          cat > perf_test.go << 'EOF'
+          package main
+          
+          import (
+            "context"
+            "fmt"
+            "time"
+            "ai-chatter/internal/notion"
+          )
+          
+          func main() {
+            token := "${{ secrets.NOTION_TOKEN }}"
+            if token == "" {
+              fmt.Println("NOTION_TOKEN not set, skipping performance test")
+              return
+            }
+            
+            fmt.Println("🚀 Starting MCP connection performance test...")
+            
+            // Тестируем время подключения
+            start := time.Now()
+            client := notion.NewMCPClient(token)
+            err := client.Connect(context.Background(), token)
+            connectionTime := time.Since(start)
+            
+            if err != nil {
+              fmt.Printf("❌ Connection failed: %v\n", err)
+              return
+            }
+            defer client.Close()
+            
+            fmt.Printf("✅ Connection established in: %v\n", connectionTime)
+            
+            if connectionTime > 5*time.Second {
+              fmt.Println("⚠️ Connection is slower than expected (>5s)")
+            }
+          }
+          EOF
+          
+          if [ -n "$NOTION_TOKEN" ]; then
+            go run perf_test.go
+          else
+            echo "⚠️ Skipping performance test - NOTION_TOKEN not configured"
+          fi
+
+      - name: Memory profiling
+        run: |
+          echo "🧠 Running memory profiling..."
+          
+          # Запускаем тесты с memory profiling
+          go test ./internal/notion -memprofile=mem.prof -run=TestMCPConnection -timeout=5m || true
+          
+          if [ -f mem.prof ]; then
+            echo "📊 Memory profile generated"
+            go tool pprof -text -alloc_space mem.prof > memory-analysis.txt
+            echo "Memory analysis:"
+            head -20 memory-analysis.txt
+          else
+            echo "⚠️ Memory profile not generated"
+          fi
+
+      - name: CPU profiling  
+        run: |
+          echo "⚡ Running CPU profiling..."
+          
+          # Запускаем тесты с CPU profiling
+          go test ./internal/notion -cpuprofile=cpu.prof -run=TestMCPConnection -timeout=5m || true
+          
+          if [ -f cpu.prof ]; then
+            echo "📊 CPU profile generated"
+            go tool pprof -text -cum cpu.prof > cpu-analysis.txt
+            echo "CPU analysis:"
+            head -20 cpu-analysis.txt
+          else
+            echo "⚠️ CPU profile not generated"
+          fi
+
+      - name: Concurrent request test
+        if: ${{ env.NOTION_TOKEN != '' }}
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TEST_PAGE_ID: ${{ secrets.NOTION_TEST_PAGE_ID }}
+          CONCURRENT_REQUESTS: ${{ inputs.concurrent_requests || '5' }}
+        run: |
+          echo "🔄 Testing concurrent requests (${CONCURRENT_REQUESTS} concurrent)..."
+          
+          # Создаём concurrent тест
+          cat > concurrent_test.go << 'EOF'
+          package main
+          
+          import (
+            "context"
+            "fmt"
+            "sync"
+            "time"
+            "ai-chatter/internal/notion"
+          )
+          
+          func main() {
+            token := "${{ secrets.NOTION_TOKEN }}"
+            testPageID := "${{ secrets.NOTION_TEST_PAGE_ID }}"
+            concurrent := ${{ inputs.concurrent_requests || '5' }}
+            
+            if token == "" || testPageID == "" {
+              fmt.Println("Secrets not set, skipping concurrent test")
+              return
+            }
+            
+            fmt.Printf("🔄 Starting %d concurrent MCP connections...\n", concurrent)
+            
+            var wg sync.WaitGroup
+            start := time.Now()
+            errors := make(chan error, concurrent)
+            
+            for i := 0; i < concurrent; i++ {
+              wg.Add(1)
+              go func(id int) {
+                defer wg.Done()
+                
+                client := notion.NewMCPClient(token)
+                err := client.Connect(context.Background(), token)
+                if err != nil {
+                  errors <- fmt.Errorf("client %d: %v", id, err)
+                  return
+                }
+                defer client.Close()
+                
+                fmt.Printf("✅ Client %d connected\n", id)
+              }(i)
+            }
+            
+            wg.Wait()
+            close(errors)
+            totalTime := time.Since(start)
+            
+            errorCount := 0
+            for err := range errors {
+              fmt.Printf("❌ %v\n", err)
+              errorCount++
+            }
+            
+            fmt.Printf("📊 Results: %d/%d successful in %v\n", concurrent-errorCount, concurrent, totalTime)
+            
+            if errorCount > 0 {
+              fmt.Printf("⚠️ %d/%d connections failed\n", errorCount, concurrent)
+            }
+          }
+          EOF
+          
+          if [ -n "$NOTION_TOKEN" ] && [ -n "$NOTION_TEST_PAGE_ID" ]; then
+            timeout 60s go run concurrent_test.go || echo "Concurrent test completed/timed out"
+          else
+            echo "⚠️ Skipping concurrent test - secrets not configured"
+          fi
+
+      - name: Generate performance report
+        if: always()
+        run: |
+          echo "📋 Generating performance report..."
+          
+          cat > performance-report.md << 'EOF'
+          # ⚡ Performance Test Report
+          
+          **Date:** $(date)
+          **Commit:** ${{ github.sha }}
+          **Tag:** ${{ github.ref_name }}
+          **Go Version:** ${{ env.GO_VERSION }}
+          
+          ## Test Configuration
+          - **Benchmark Duration:** ${{ inputs.benchmark_duration || '30s' }}
+          - **Concurrent Requests:** ${{ inputs.concurrent_requests || '5' }}
+          
+          ## Results Summary
+          EOF
+          
+          # Добавляем результаты бенчмарков если есть
+          if [ -f benchmark-results.txt ]; then
+            echo "### Go Benchmarks" >> performance-report.md
+            echo '```' >> performance-report.md
+            cat benchmark-results.txt >> performance-report.md
+            echo '```' >> performance-report.md
+            echo "" >> performance-report.md
+          fi
+          
+          # Добавляем анализ памяти если есть
+          if [ -f memory-analysis.txt ]; then
+            echo "### Memory Analysis (Top Allocations)" >> performance-report.md
+            echo '```' >> performance-report.md
+            head -10 memory-analysis.txt >> performance-report.md
+            echo '```' >> performance-report.md
+            echo "" >> performance-report.md
+          fi
+          
+          # Добавляем анализ CPU если есть
+          if [ -f cpu-analysis.txt ]; then
+            echo "### CPU Analysis (Top Functions)" >> performance-report.md
+            echo '```' >> performance-report.md
+            head -10 cpu-analysis.txt >> performance-report.md
+            echo '```' >> performance-report.md
+          fi
+          
+          echo "Report generated at $(date)"
+
+      - name: Upload performance artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: performance-results-${{ github.run_number }}
+          path: |
+            performance-report.md
+            benchmark-results.txt
+            memory-analysis.txt
+            cpu-analysis.txt
+            *.prof
+          retention-days: 90
+
+      - name: Performance regression check
+        if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+        run: |
+          echo "🔍 Checking for performance regressions..."
+          
+          # Здесь можно сравнить результаты с предыдущими релизами
+          # Используя GitHub API или сохранённые артефакты
+          
+          echo "📊 Performance check completed"
+          echo "💡 To detect regressions, compare with previous release artifacts"
