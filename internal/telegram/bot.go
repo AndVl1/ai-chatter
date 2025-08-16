@@ -56,7 +56,8 @@ type Bot struct {
 	// per-user remaining steps in TZ mode
 	tzRemaining map[int64]int
 	// Notion MCP client
-	mcpClient *notion.MCPClient
+	mcpClient        *notion.MCPClient
+	notionParentPage string
 }
 
 func New(
@@ -72,6 +73,7 @@ func New(
 	provider string,
 	model string,
 	mcpClient *notion.MCPClient,
+	notionParentPage string,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
@@ -95,6 +97,7 @@ func New(
 		tzMode:           make(map[int64]bool),
 		tzRemaining:      make(map[int64]int),
 		mcpClient:        mcpClient,
+		notionParentPage: notionParentPage,
 	}
 	// Try to preload model2 from file if present
 	if data, err := os.ReadFile("data/model2.txt"); err == nil {

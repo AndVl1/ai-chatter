@@ -7,7 +7,6 @@ require (
 	github.com/caarlos0/env/v6 v6.10.1
 	github.com/go-telegram-bot-api/telegram-bot-api/v5 v5.5.1
 	github.com/joho/godotenv v1.5.1
-	github.com/llmcontext/gomcp v0.3.0
 	github.com/modelcontextprotocol/go-sdk v0.2.0
 	github.com/sashabaranov/go-openai v1.40.5
 )

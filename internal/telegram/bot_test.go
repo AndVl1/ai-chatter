@@ -36,6 +36,10 @@ func (f *fakeLLMSeq) Generate(_ context.Context, msgs []llm.Message) (llm.Respon
 	return f.seq[idx], nil
 }
 
+func (f *fakeLLMSeq) GenerateWithTools(_ context.Context, msgs []llm.Message, _ []llm.Tool) (llm.Response, error) {
+	return f.Generate(context.Background(), msgs)
+}
+
 func (f *fakeSender) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	sw := c.(tgbotapi.MessageConfig)
 	f.sent = append(f.sent, sw.Text)
@@ -43,6 +47,10 @@ func (f *fakeSender) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 }
 
 func (f fakeLLM) Generate(_ context.Context, _ []llm.Message) (llm.Response, error) {
+	return f.resp, f.err
+}
+
+func (f fakeLLM) GenerateWithTools(_ context.Context, _ []llm.Message, _ []llm.Tool) (llm.Response, error) {
 	return f.resp, f.err
 }
 

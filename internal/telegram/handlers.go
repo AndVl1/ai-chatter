@@ -328,6 +328,13 @@ func (b *Bot) handleNotionSave(msg *tgbotapi.Message) {
 	}
 
 	ctx := context.Background()
+
+	// Проверяем настройку parent page
+	if b.notionParentPage == "" {
+		b.sendMessage(msg.Chat.ID, "❌ Не настроен NOTION_PARENT_PAGE_ID. Настройте переменную окружения с ID страницы из Notion.")
+		return
+	}
+
 	result := b.mcpClient.CreateDialogSummary(
 		ctx,
 		args, // title
@@ -335,6 +342,7 @@ func (b *Bot) handleNotionSave(msg *tgbotapi.Message) {
 		fmt.Sprintf("%d", msg.From.ID),
 		msg.From.UserName,
 		"dialog_summary",
+		b.notionParentPage,
 	)
 
 	if result.Success {

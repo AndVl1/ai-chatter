@@ -60,7 +60,12 @@ func (c *OpenAIClient) Generate(ctx context.Context, messages []Message) (Respon
 func (c *OpenAIClient) GenerateWithTools(ctx context.Context, messages []Message, tools []Tool) (Response, error) {
 	var oaMsgs []openai.ChatCompletionMessage
 	for _, m := range messages {
-		oaMsgs = append(oaMsgs, openai.ChatCompletionMessage{Role: m.Role, Content: m.Content})
+		msg := openai.ChatCompletionMessage{Role: m.Role, Content: m.Content}
+		// Для tool response сообщений добавляем ToolCallID
+		if m.Role == "tool" && m.ToolCallID != "" {
+			msg.ToolCallID = m.ToolCallID
+		}
+		oaMsgs = append(oaMsgs, msg)
 	}
 
 	req := openai.ChatCompletionRequest{

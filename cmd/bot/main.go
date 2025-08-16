@@ -109,6 +109,7 @@ func main() {
 		prov,
 		model,
 		mcpClient,
+		cfg.NotionParentPage,
 	)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)

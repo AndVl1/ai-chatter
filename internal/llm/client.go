@@ -3,8 +3,9 @@ package llm
 import "context"
 
 type Message struct {
-	Role    string
-	Content string
+	Role       string
+	Content    string
+	ToolCallID string // Для tool response сообщений
 }
 
 // FunctionCall представляет вызов функции от LLM
@@ -31,6 +32,12 @@ type Function struct {
 type Tool struct {
 	Type     string   `json:"type"`
 	Function Function `json:"function"`
+}
+
+// ToolCallResult представляет результат выполнения tool call
+type ToolCallResult struct {
+	ToolCallID string
+	Content    string
 }
 
 type Response struct {

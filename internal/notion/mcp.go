@@ -1,368 +1,457 @@
 package notion
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
-	"strings"
+	"os"
+	"os/exec"
 	"time"
+
+	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// MCPClient клиент для работы с Notion (улучшенная версия)
+// MCPClient клиент для работы с кастомным Notion MCP сервером
 type MCPClient struct {
-	token      string
-	httpClient *http.Client
+	client  *mcp.Client
+	session *mcp.ClientSession
 }
 
 // NewMCPClient создает новый MCP клиент для Notion
 func NewMCPClient(token string) *MCPClient {
-	return &MCPClient{
-		token: token,
-		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-	}
+	return &MCPClient{}
 }
 
-// Connect - заглушка для совместимости (в реальной реализации соединение не требуется)
+// Connect подключается к кастомному Notion MCP серверу через stdio
 func (m *MCPClient) Connect(ctx context.Context, notionToken string) error {
-	if notionToken == "" {
-		return fmt.Errorf("notion token is empty")
+	log.Printf("🔗 Connecting to custom Notion MCP server via stdio")
+
+	// Создаем MCP клиент
+	m.client = mcp.NewClient(&mcp.Implementation{
+		Name:    "ai-chatter-bot",
+		Version: "1.0.0",
+	}, nil)
+
+	// Запускаем наш кастомный MCP сервер как подпроцесс
+	serverPath := "./notion-mcp-server"
+	if customPath := os.Getenv("NOTION_MCP_SERVER_PATH"); customPath != "" {
+		serverPath = customPath
 	}
-	m.token = notionToken
-	log.Printf("✅ Notion client initialized with REST API")
+
+	cmd := exec.CommandContext(ctx, serverPath)
+	cmd.Env = append(os.Environ(), fmt.Sprintf("NOTION_TOKEN=%s", notionToken))
+
+	transport := mcp.NewCommandTransport(cmd)
+
+	session, err := m.client.Connect(ctx, transport)
+	if err != nil {
+		return fmt.Errorf("failed to connect to custom MCP server: %w", err)
+	}
+
+	m.session = session
+	log.Printf("✅ Connected to custom Notion MCP server")
 	return nil
 }
 
-// Close - заглушка для совместимости
+// Close закрывает соединение с MCP сервером
 func (m *MCPClient) Close() error {
+	if m.session != nil {
+		return m.session.Close()
+	}
 	return nil
 }
 
-// CreateDialogSummary создает страницу с сохранением диалога
-func (m *MCPClient) CreateDialogSummary(ctx context.Context, title, content, userID, username, dialogType string) MCPResult {
-	log.Printf("📝 Creating Notion page: %s", title)
-
-	// Ищем подходящую родительскую страницу
-	parentPageID := m.findParentPageID(ctx, "AI Chatter")
-
-	var parent map[string]interface{}
-	if parentPageID != "" {
-		parent = map[string]interface{}{"page_id": parentPageID}
-		log.Printf("🔗 Creating page under parent: %s", parentPageID)
-	} else {
-		// Создаем на уровне workspace, если родитель не найден
-		parent = map[string]interface{}{"workspace": true}
-		log.Printf("📄 Creating workspace-level page")
+// CreateDialogSummary создает страницу с сохранением диалога через кастомный MCP
+func (m *MCPClient) CreateDialogSummary(ctx context.Context, title, content, userID, username, dialogType, parentPageID string) MCPResult {
+	if m.session == nil {
+		return MCPResult{Success: false, Message: "MCP session not connected"}
 	}
 
-	// Формируем содержимое с метаданными
-	formattedContent := fmt.Sprintf(`# %s
+	log.Printf("📝 Creating Notion page via custom MCP: %s", title)
 
-**Пользователь:** %s (%s)  
-**Тип:** %s  
-**Создано:** %s
+	// Проверяем обязательный parent_page_id
+	if parentPageID == "" {
+		return MCPResult{Success: false, Message: "parent_page_id is required - get it from your Notion workspace"}
+	}
 
----
-
-%s`, title, username, userID, dialogType, time.Now().Format("2006-01-02 15:04:05"), content)
-
-	// Формируем блоки для Notion API
-	reqBody := map[string]interface{}{
-		"parent": parent,
-		"properties": map[string]interface{}{
-			"title": []map[string]interface{}{
-				{"type": "text", "text": map[string]interface{}{"content": title}},
-			},
+	// Вызываем инструмент save_dialog_to_notion
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "save_dialog_to_notion",
+		Arguments: map[string]any{
+			"title":          title,
+			"content":        content,
+			"user_id":        userID,
+			"username":       username,
+			"dialog_type":    dialogType,
+			"parent_page_id": parentPageID,
 		},
-		"children": m.createNotionBlocks(formattedContent),
-	}
+	})
 
-	payload, _ := json.Marshal(reqBody)
-	respBody, status, err := m.doNotionRequest(ctx, http.MethodPost, "/pages", payload)
 	if err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("create page error: %v", err)}
-	}
-	if status < 200 || status >= 300 {
-		return MCPResult{Success: false, Message: fmt.Sprintf("create page bad status: %d, body: %s", status, string(respBody))}
+		log.Printf("❌ MCP save_dialog error: %v", err)
+		return MCPResult{Success: false, Message: fmt.Sprintf("MCP error: %v", err)}
 	}
 
-	var created struct {
-		ID  string `json:"id"`
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal(respBody, &created); err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("decode response error: %v", err)}
+	if result.IsError {
+		return MCPResult{Success: false, Message: "Tool returned error"}
 	}
 
-	data := map[string]interface{}{"page_id": created.ID, "title": title, "type": dialogType, "url": created.URL}
-	dataJSON, _ := json.Marshal(data)
-	return MCPResult{Success: true, Message: fmt.Sprintf("Successfully created page: %s", title), PageID: created.ID, Data: string(dataJSON)}
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	var pageID string
+	if result.Meta != nil {
+		if id, ok := result.Meta["page_id"].(string); ok {
+			pageID = id
+		}
+	}
+
+	return MCPResult{
+		Success: true,
+		Message: responseText,
+		PageID:  pageID,
+		Data:    formatResultMeta(result.Meta),
+	}
 }
 
-// SearchDialogSummaries ищет сохраненные диалоги
+// SearchDialogSummaries ищет сохраненные диалоги через кастомный MCP
 func (m *MCPClient) SearchDialogSummaries(ctx context.Context, query, userID, dialogType string) MCPResult {
-	log.Printf("🔍 Searching Notion: query='%s', user='%s', type='%s'", query, userID, dialogType)
-
-	payload := map[string]interface{}{
-		"query": query,
-		"filter": map[string]interface{}{
-			"value":    "page",
-			"property": "object",
-		},
-		"page_size": 20,
-	}
-	body, _ := json.Marshal(payload)
-	respBody, status, err := m.doNotionRequest(ctx, http.MethodPost, "/search", body)
-	if err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("search error: %v", err)}
-	}
-	if status < 200 || status >= 300 {
-		return MCPResult{Success: false, Message: fmt.Sprintf("search bad status: %d, body: %s", status, string(respBody))}
+	if m.session == nil {
+		return MCPResult{Success: false, Message: "MCP session not connected"}
 	}
 
-	// Парсим результаты поиска
-	var searchResult struct {
-		Results []struct {
-			ID         string                 `json:"id"`
-			URL        string                 `json:"url"`
-			Properties map[string]interface{} `json:"properties"`
-		} `json:"results"`
-	}
+	log.Printf("🔍 Searching Notion via custom MCP: query='%s'", query)
 
-	if err := json.Unmarshal(respBody, &searchResult); err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("failed to parse search results: %v", err)}
-	}
-
-	// Форматируем результаты для пользователя
-	var resultText strings.Builder
-	resultText.WriteString(fmt.Sprintf("Найдено %d результатов для запроса '%s':\n\n", len(searchResult.Results), query))
-
-	for i, result := range searchResult.Results {
-		title := extractTitleFromProperties(result.Properties)
-		if title == "" {
-			title = "Без названия"
-		}
-		resultText.WriteString(fmt.Sprintf("%d. %s\n   URL: %s\n\n", i+1, title, result.URL))
-	}
-
-	return MCPResult{Success: true, Message: resultText.String(), Data: string(respBody)}
-}
-
-// CreateFreeFormPage создает произвольную страницу
-func (m *MCPClient) CreateFreeFormPage(ctx context.Context, title, content, parentPageName string, tags []string) MCPResult {
-	log.Printf("📄 Creating free-form Notion page: %s", title)
-
-	var parent map[string]interface{}
-	if parentPageName != "" {
-		if parentID := m.findParentPageID(ctx, parentPageName); parentID != "" {
-			parent = map[string]interface{}{"page_id": parentID}
-			log.Printf("🔗 Will create under parent: %s (%s)", parentPageName, parentID)
-		} else {
-			parent = map[string]interface{}{"workspace": true}
-			log.Printf("⚠️ Parent '%s' not found, creating in workspace", parentPageName)
-		}
-	} else {
-		parent = map[string]interface{}{"workspace": true}
-		log.Printf("📄 Creating workspace-level page")
-	}
-
-	reqBody := map[string]interface{}{
-		"parent": parent,
-		"properties": map[string]interface{}{
-			"title": []map[string]interface{}{
-				{"type": "text", "text": map[string]interface{}{"content": title}},
+	// Вызываем инструмент search_pages
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name: "search_pages",
+		Arguments: map[string]any{
+			"query": query,
+			"filter": map[string]any{
+				"property": "Type",
+				"select": map[string]any{
+					"equals": "Dialog",
+				},
 			},
+			"page_size": 20,
 		},
-		"children": m.createNotionBlocks(content),
-	}
+	})
 
-	payload, _ := json.Marshal(reqBody)
-	respBody, status, err := m.doNotionRequest(ctx, http.MethodPost, "/pages", payload)
 	if err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("create page error: %v", err)}
-	}
-	if status < 200 || status >= 300 {
-		return MCPResult{Success: false, Message: fmt.Sprintf("create page bad status: %d, body: %s", status, string(respBody))}
+		log.Printf("❌ MCP search error: %v", err)
+		return MCPResult{Success: false, Message: fmt.Sprintf("MCP search error: %v", err)}
 	}
 
-	var created struct {
-		ID  string `json:"id"`
-		URL string `json:"url"`
-	}
-	if err := json.Unmarshal(respBody, &created); err != nil {
-		return MCPResult{Success: false, Message: fmt.Sprintf("decode response error: %v", err)}
+	if result.IsError {
+		return MCPResult{Success: false, Message: "Tool returned error"}
 	}
 
-	data := map[string]interface{}{"page_id": created.ID, "title": title, "url": created.URL, "type": "free-form", "tags": tags}
-	dataJSON, _ := json.Marshal(data)
-	return MCPResult{Success: true, Message: fmt.Sprintf("Successfully created free-form page: %s", title), PageID: created.ID, Data: string(dataJSON)}
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	return MCPResult{
+		Success: true,
+		Message: responseText,
+		Data:    formatResultMeta(result.Meta),
+	}
 }
 
-// SearchWorkspace выполняет поиск по workspace
+// CreateFreeFormPage создает произвольную страницу через кастомный MCP
+func (m *MCPClient) CreateFreeFormPage(ctx context.Context, title, content, parentPageId string, tags []string) MCPResult {
+	if m.session == nil {
+		return MCPResult{Success: false, Message: "MCP session not connected"}
+	}
+
+	log.Printf("📄 Creating free-form page via custom MCP: %s", title)
+
+	// Вызываем инструмент create_page
+	args := map[string]any{
+		"title":   title,
+		"content": content,
+		"properties": map[string]any{
+			"Type":    "Free-form",
+			"Created": time.Now().Format("2006-01-02"),
+		},
+	}
+
+	if parentPageId == "" {
+		return MCPResult{Success: false, Message: "parent_page_id is required - get it from your Notion workspace"}
+	}
+
+	args["parent_page_id"] = parentPageId
+
+	if len(tags) > 0 {
+		args["properties"].(map[string]any)["Tags"] = tags
+	}
+
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "create_page",
+		Arguments: args,
+	})
+
+	if err != nil {
+		return MCPResult{Success: false, Message: fmt.Sprintf("MCP error: %v", err)}
+	}
+
+	if result.IsError {
+		return MCPResult{Success: false, Message: fmt.Sprintf("Tool returned error: %v", result.Content)}
+	}
+
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	var pageID string
+	if result.Meta != nil {
+		if id, ok := result.Meta["page_id"].(string); ok {
+			pageID = id
+		}
+	}
+
+	return MCPResult{
+		Success: true,
+		Message: responseText,
+		PageID:  pageID,
+		Data:    formatResultMeta(result.Meta),
+	}
+}
+
+// SearchWorkspace выполняет поиск по workspace через кастомный MCP
 func (m *MCPClient) SearchWorkspace(ctx context.Context, query, pageType string, tags []string) MCPResult {
-	return m.SearchDialogSummaries(ctx, query, "", "")
-}
+	if m.session == nil {
+		return MCPResult{Success: false, Message: "MCP session not connected"}
+	}
 
-// createNotionBlocks создает блоки для Notion API из markdown содержимого
-func (m *MCPClient) createNotionBlocks(content string) []map[string]interface{} {
-	// Разбиваем содержимое на абзацы
-	paragraphs := strings.Split(content, "\n\n")
-	var blocks []map[string]interface{}
+	args := map[string]any{
+		"query":     query,
+		"page_size": 50,
+	}
 
-	for _, paragraph := range paragraphs {
-		paragraph = strings.TrimSpace(paragraph)
-		if paragraph == "" {
-			continue
-		}
-
-		// Обработка заголовков
-		if strings.HasPrefix(paragraph, "# ") {
-			blocks = append(blocks, map[string]interface{}{
-				"object": "block",
-				"type":   "heading_1",
-				"heading_1": map[string]interface{}{
-					"rich_text": []map[string]interface{}{
-						{"type": "text", "text": map[string]interface{}{"content": strings.TrimPrefix(paragraph, "# ")}},
-					},
-				},
-			})
-		} else if strings.HasPrefix(paragraph, "## ") {
-			blocks = append(blocks, map[string]interface{}{
-				"object": "block",
-				"type":   "heading_2",
-				"heading_2": map[string]interface{}{
-					"rich_text": []map[string]interface{}{
-						{"type": "text", "text": map[string]interface{}{"content": strings.TrimPrefix(paragraph, "## ")}},
-					},
-				},
-			})
-		} else if strings.HasPrefix(paragraph, "### ") {
-			blocks = append(blocks, map[string]interface{}{
-				"object": "block",
-				"type":   "heading_3",
-				"heading_3": map[string]interface{}{
-					"rich_text": []map[string]interface{}{
-						{"type": "text", "text": map[string]interface{}{"content": strings.TrimPrefix(paragraph, "### ")}},
-					},
-				},
-			})
-		} else if strings.Contains(paragraph, "---") {
-			// Разделитель
-			blocks = append(blocks, map[string]interface{}{
-				"object":  "block",
-				"type":    "divider",
-				"divider": map[string]interface{}{},
-			})
-		} else {
-			// Обычный параграф
-			blocks = append(blocks, map[string]interface{}{
-				"object": "block",
-				"type":   "paragraph",
-				"paragraph": map[string]interface{}{
-					"rich_text": []map[string]interface{}{
-						{"type": "text", "text": map[string]interface{}{"content": paragraph}},
-					},
-				},
-			})
+	// Добавляем фильтр по типу если указан
+	if pageType != "" {
+		args["filter"] = map[string]any{
+			"property": "Type",
+			"select": map[string]any{
+				"equals": pageType,
+			},
 		}
 	}
 
-	return blocks
-}
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_pages",
+		Arguments: args,
+	})
 
-// findParentPageID ищет ID родительской страницы по названию
-func (m *MCPClient) findParentPageID(ctx context.Context, pageName string) string {
-	log.Printf("🔍 Searching for parent page: %s", pageName)
-
-	payload := map[string]interface{}{
-		"query": pageName,
-		"filter": map[string]interface{}{
-			"value":    "page",
-			"property": "object",
-		},
-		"page_size": 25,
-	}
-	body, _ := json.Marshal(payload)
-	respBody, status, err := m.doNotionRequest(ctx, http.MethodPost, "/search", body)
-	if err != nil || status < 200 || status >= 300 {
-		log.Printf("❌ Parent page search failed: status=%d err=%v", status, err)
-		return ""
-	}
-
-	var search struct {
-		Results []struct {
-			ID         string                 `json:"id"`
-			URL        string                 `json:"url"`
-			Properties map[string]interface{} `json:"properties"`
-		} `json:"results"`
-	}
-	if err := json.Unmarshal(respBody, &search); err != nil {
-		log.Printf("❌ decode search response error: %v", err)
-		return ""
-	}
-
-	lower := strings.ToLower(pageName)
-	for _, result := range search.Results {
-		if result.URL != "" && strings.Contains(strings.ToLower(result.URL), strings.ReplaceAll(lower, " ", "-")) {
-			return result.ID
-		}
-		if title := extractTitleFromProperties(result.Properties); strings.EqualFold(title, pageName) {
-			return result.ID
-		}
-	}
-	return ""
-}
-
-// doNotionRequest выполняет HTTP запрос к Notion API
-func (m *MCPClient) doNotionRequest(ctx context.Context, method, path string, body []byte) ([]byte, int, error) {
-	if m.token == "" {
-		return nil, 0, fmt.Errorf("NOTION_TOKEN is empty")
-	}
-
-	const notionAPIBase = "https://api.notion.com/v1"
-	const notionAPIVersion = "2022-06-28"
-
-	req, err := http.NewRequestWithContext(ctx, method, notionAPIBase+path, bytes.NewReader(body))
 	if err != nil {
-		return nil, 0, err
+		return MCPResult{Success: false, Message: fmt.Sprintf("MCP search error: %v", err)}
 	}
 
-	req.Header.Set("Authorization", "Bearer "+m.token)
-	req.Header.Set("Notion-Version", notionAPIVersion)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := m.httpClient.Do(req)
-	if err != nil {
-		return nil, 0, err
+	if result.IsError {
+		return MCPResult{Success: false, Message: "Tool returned error"}
 	}
-	defer resp.Body.Close()
 
-	respBytes, _ := io.ReadAll(resp.Body)
-	return respBytes, resp.StatusCode, nil
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	return MCPResult{
+		Success: true,
+		Message: responseText,
+		Data:    formatResultMeta(result.Meta),
+	}
 }
 
-// extractTitleFromProperties извлекает заголовок страницы из properties
-func extractTitleFromProperties(props map[string]interface{}) string {
-	if props == nil {
-		return ""
+// SearchPagesWithID ищет страницы в Notion и возвращает их ID, название и URL
+func (m *MCPClient) SearchPagesWithID(ctx context.Context, query string, limit int, exactMatch bool) MCPPageSearchResult {
+	if m.session == nil {
+		return MCPPageSearchResult{Success: false, Message: "MCP session not connected"}
 	}
-	if v, ok := props["title"]; ok {
-		if arr, ok := v.([]interface{}); ok && len(arr) > 0 {
-			if first, ok := arr[0].(map[string]interface{}); ok {
-				if text, ok := first["text"].(map[string]interface{}); ok {
-					if content, ok := text["content"].(string); ok {
-						return content
+
+	args := map[string]any{
+		"query": query,
+	}
+
+	if limit > 0 {
+		args["limit"] = limit
+	}
+
+	if exactMatch {
+		args["exact_match"] = exactMatch
+	}
+
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "search_pages_with_id",
+		Arguments: args,
+	})
+
+	if err != nil {
+		return MCPPageSearchResult{Success: false, Message: fmt.Sprintf("MCP search error: %v", err)}
+	}
+
+	if result.IsError {
+		return MCPPageSearchResult{Success: false, Message: "Tool returned error"}
+	}
+
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	// Извлекаем метаданные с результатами
+	var pages []MCPPageResult
+	var totalFound int
+
+	if result.Meta != nil {
+		// Извлекаем total_found
+		if count, ok := result.Meta["total_found"].(float64); ok {
+			totalFound = int(count)
+		}
+
+		// Извлекаем результаты
+		if resultsData, ok := result.Meta["results"].([]any); ok {
+			for _, item := range resultsData {
+				if pageData, ok := item.(map[string]any); ok {
+					page := MCPPageResult{}
+					if id, ok := pageData["id"].(string); ok {
+						page.ID = id
 					}
+					if title, ok := pageData["title"].(string); ok {
+						page.Title = title
+					}
+					if url, ok := pageData["url"].(string); ok {
+						page.URL = url
+					}
+					pages = append(pages, page)
 				}
 			}
 		}
 	}
-	return ""
+
+	return MCPPageSearchResult{
+		Success:    true,
+		Message:    responseText,
+		Pages:      pages,
+		TotalFound: totalFound,
+	}
+}
+
+// ListAvailablePages получает список доступных страниц в Notion workspace
+func (m *MCPClient) ListAvailablePages(ctx context.Context, limit int, pageType string, parentOnly bool) MCPAvailablePagesResult {
+	if m.session == nil {
+		return MCPAvailablePagesResult{Success: false, Message: "MCP session not connected"}
+	}
+
+	args := map[string]any{}
+
+	if limit > 0 {
+		args["limit"] = limit
+	}
+
+	if pageType != "" {
+		args["page_type"] = pageType
+	}
+
+	if parentOnly {
+		args["parent_only"] = parentOnly
+	}
+
+	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
+		Name:      "list_available_pages",
+		Arguments: args,
+	})
+
+	if err != nil {
+		return MCPAvailablePagesResult{Success: false, Message: fmt.Sprintf("MCP list pages error: %v", err)}
+	}
+
+	if result.IsError {
+		return MCPAvailablePagesResult{Success: false, Message: "Tool returned error"}
+	}
+
+	// Извлекаем текст из результата
+	var responseText string
+	for _, content := range result.Content {
+		if textContent, ok := content.(*mcp.TextContent); ok {
+			responseText += textContent.Text
+		}
+	}
+
+	// Извлекаем метаданные с результатами
+	var pages []MCPAvailablePageResult
+	var totalFound int
+
+	if result.Meta != nil {
+		// Извлекаем total_found
+		if count, ok := result.Meta["total_found"].(float64); ok {
+			totalFound = int(count)
+		}
+
+		// Извлекаем результаты
+		if pagesData, ok := result.Meta["pages"].([]any); ok {
+			for _, item := range pagesData {
+				if pageData, ok := item.(map[string]any); ok {
+					page := MCPAvailablePageResult{}
+					if id, ok := pageData["id"].(string); ok {
+						page.ID = id
+					}
+					if title, ok := pageData["title"].(string); ok {
+						page.Title = title
+					}
+					if url, ok := pageData["url"].(string); ok {
+						page.URL = url
+					}
+					if canBeParent, ok := pageData["can_be_parent"].(bool); ok {
+						page.CanBeParent = canBeParent
+					}
+					if pageType, ok := pageData["type"].(string); ok {
+						page.Type = pageType
+					}
+					pages = append(pages, page)
+				}
+			}
+		}
+	}
+
+	return MCPAvailablePagesResult{
+		Success:    true,
+		Message:    responseText,
+		Pages:      pages,
+		TotalFound: totalFound,
+	}
+}
+
+// formatResultMeta форматирует метаданные результата в JSON строку
+func formatResultMeta(meta any) string {
+	if meta == nil {
+		return ""
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 // MCPResult представляет результат MCP вызова
@@ -398,4 +487,36 @@ type MCPSearchItem struct {
 	Highlight string `json:"highlight"`
 	Timestamp string `json:"timestamp"`
 	ID        string `json:"id"`
+}
+
+// MCPPageSearchResult результат поиска страниц с ID
+type MCPPageSearchResult struct {
+	Success    bool            `json:"success"`
+	Message    string          `json:"message"`
+	Pages      []MCPPageResult `json:"pages"`
+	TotalFound int             `json:"total_found"`
+}
+
+// MCPPageResult информация о найденной странице
+type MCPPageResult struct {
+	ID    string `json:"id"`
+	Title string `json:"title"`
+	URL   string `json:"url"`
+}
+
+// MCPAvailablePagesResult результат получения списка доступных страниц
+type MCPAvailablePagesResult struct {
+	Success    bool                     `json:"success"`
+	Message    string                   `json:"message"`
+	Pages      []MCPAvailablePageResult `json:"pages"`
+	TotalFound int                      `json:"total_found"`
+}
+
+// MCPAvailablePageResult информация о доступной странице
+type MCPAvailablePageResult struct {
+	ID          string `json:"id"`
+	Title       string `json:"title"`
+	URL         string `json:"url"`
+	CanBeParent bool   `json:"can_be_parent"`
+	Type        string `json:"type,omitempty"`
 }

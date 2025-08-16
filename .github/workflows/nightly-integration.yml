@@ -1,0 +1,208 @@
+name: Nightly Integration Tests
+
+on:
+  # Запуск каждую ночь в 02:00 UTC
+  schedule:
+    - cron: '0 2 * * *'
+  # Также можно запустить вручную
+  workflow_dispatch:
+    inputs:
+      test_scope:
+        description: 'Test scope'
+        required: false
+        default: 'full'
+        type: choice
+        options:
+          - full
+          - notion-only
+          - connection-only
+
+env:
+  GO_VERSION: '1.22.x'
+
+jobs:
+  nightly-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - name: Download dependencies
+        run: go mod download
+
+      - name: Build applications
+        run: |
+          echo "🔨 Building applications..."
+          go build -o ai-chatter cmd/bot/main.go
+          go build -o notion-mcp-server cmd/notion-mcp-server/main.go
+          go build -o test-custom-mcp cmd/test-custom-mcp/main.go
+
+      - name: Make scripts executable
+        run: chmod +x scripts/*.sh
+
+      - name: Check environment setup
+        run: |
+          echo "🔍 Checking CI environment..."
+          echo "Go version: $(go version)"
+          echo "OS: $(uname -a)"
+          echo "Available memory: $(free -h)"
+          echo "Available disk: $(df -h .)"
+
+      - name: Validate secrets
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TEST_PAGE_ID: ${{ secrets.NOTION_TEST_PAGE_ID }}
+        run: |
+          if [ -z "$NOTION_TOKEN" ]; then
+            echo "❌ NOTION_TOKEN secret is not configured"
+            echo "🔧 Configure it in GitHub repository settings: Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          
+          if [ -z "$NOTION_TEST_PAGE_ID" ]; then
+            echo "❌ NOTION_TEST_PAGE_ID secret is not configured"
+            echo "🔧 Configure it in GitHub repository settings: Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+          
+          echo "✅ All required secrets are configured"
+
+      - name: Run full integration test suite
+        if: ${{ inputs.test_scope == 'full' || inputs.test_scope == '' }}
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TEST_PAGE_ID: ${{ secrets.NOTION_TEST_PAGE_ID }}
+        run: |
+          echo "🚀 Running full integration test suite..."
+          ./scripts/test-notion-integration.sh
+
+      - name: Run Notion-only tests
+        if: ${{ inputs.test_scope == 'notion-only' }}
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TEST_PAGE_ID: ${{ secrets.NOTION_TEST_PAGE_ID }}
+        run: |
+          echo "📝 Running Notion-specific tests..."
+          go test ./internal/notion -run "TestMCPIntegration" -v -timeout=10m
+
+      - name: Run connection tests
+        if: ${{ inputs.test_scope == 'connection-only' }}
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+        run: |
+          echo "🔗 Running connection tests..."
+          go test ./internal/notion -run "TestMCPConnection" -v -timeout=5m
+
+      - name: Performance benchmarks
+        if: ${{ inputs.test_scope == 'full' || inputs.test_scope == '' }}
+        env:
+          NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
+          NOTION_TEST_PAGE_ID: ${{ secrets.NOTION_TEST_PAGE_ID }}
+        run: |
+          echo "⚡ Running performance benchmarks..."
+          
+          # Измеряем время создания страницы
+          echo "📄 Testing page creation speed..."
+          time go test ./internal/notion -run "TestMCPIntegration/CreateFreeFormPage" -v -count=1
+          
+          # Измеряем время поиска
+          echo "🔍 Testing search speed..."
+          time go test ./internal/notion -run "TestMCPIntegration/SearchWorkspace" -v -count=1
+
+      - name: Generate test report
+        if: always()
+        run: |
+          echo "📊 Generating test report..."
+          
+          # Создаём отчёт
+          cat > test-report.md << 'EOF'
+          # 🧪 Nightly Integration Test Report
+          
+          **Date:** $(date)
+          **Commit:** ${{ github.sha }}
+          **Workflow:** ${{ github.workflow }}
+          **Test Scope:** ${{ inputs.test_scope || 'full' }}
+          
+          ## Environment
+          - **Go Version:** ${{ env.GO_VERSION }}
+          - **OS:** ubuntu-latest
+          - **Runner:** ${{ runner.name }}
+          
+          ## Test Results
+          EOF
+          
+          if [ -f test-results.txt ]; then
+            cat test-results.txt >> test-report.md
+          else
+            echo "Test results not available" >> test-report.md
+          fi
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-test-results-${{ github.run_number }}
+          path: |
+            test-report.md
+            *.log
+            coverage.out
+          retention-days: 30
+
+      - name: Notify on failure
+        if: failure()
+        run: |
+          echo "🚨 Nightly integration tests failed!"
+          echo "Check the logs and test results for details."
+          echo "This could indicate:"
+          echo "  - Notion API changes"
+          echo "  - Network connectivity issues"
+          echo "  - Test environment problems"
+          echo "  - Regression in the codebase"
+
+  # Job для анализа трендов
+  trend-analysis:
+    runs-on: ubuntu-latest
+    needs: nightly-integration
+    if: always()
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Нужна полная история для анализа
+
+      - name: Analyze test trends
+        run: |
+          echo "📈 Analyzing test trends..."
+          
+          # Получаем последние 10 запусков workflow
+          echo "## Recent Integration Test Results" > trend-report.md
+          echo "" >> trend-report.md
+          echo "| Date | Status | Duration | Commit |" >> trend-report.md
+          echo "|------|--------|----------|--------|" >> trend-report.md
+          
+          # Здесь можно добавить анализ через GitHub API
+          # Пока просто показываем текущий статус
+          if [ "${{ needs.nightly-integration.result }}" == "success" ]; then
+            echo "| $(date) | ✅ Success | - | ${{ github.sha }} |" >> trend-report.md
+          else
+            echo "| $(date) | ❌ Failed | - | ${{ github.sha }} |" >> trend-report.md
+          fi
+          
+          echo "" >> trend-report.md
+          echo "**Legend:** ✅ Success, ❌ Failed, ⏸️ Cancelled, ⚠️ Skipped" >> trend-report.md
+
+      - name: Upload trend analysis
+        uses: actions/upload-artifact@v4
+        with:
+          name: trend-analysis-${{ github.run_number }}
+          path: trend-report.md
+          retention-days: 90
