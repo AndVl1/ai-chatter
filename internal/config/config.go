@@ -47,7 +47,8 @@ type Config struct {
 	MessageParseMode string `env:"MESSAGE_PARSE_MODE" envDefault:"HTML"`
 
 	// Notion integration
-	NotionToken string `env:"NOTION_TOKEN"`
+	NotionToken      string `env:"NOTION_TOKEN"`
+	NotionParentPage string `env:"NOTION_PARENT_PAGE_ID"`
 }
 
 func New() *Config {
