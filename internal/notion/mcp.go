@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -226,7 +227,7 @@ func (m *MCPClient) CreateFreeFormPage(ctx context.Context, title, content, pare
 	return MCPResult{
 		Success: true,
 		Message: responseText,
-		PageID:  pageID,
+		PageID:  strings.Replace(pageID, "-", "", -1),
 		Data:    formatResultMeta(result.Meta),
 	}
 }

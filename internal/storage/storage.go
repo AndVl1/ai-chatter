@@ -14,6 +14,8 @@ type Event struct {
 	// CanUse indicates whether this piece of content should be used in context.
 	// It is a pointer for backward compatibility with old logs (nil => treat as true).
 	CanUse *bool `json:"can_use,omitempty"`
+	// MCPFunctionCalls tracks MCP function calls made during this interaction
+	MCPFunctionCalls []string `json:"mcp_function_calls,omitempty"`
 }
 
 // Recorder abstracts persistence of interaction events.

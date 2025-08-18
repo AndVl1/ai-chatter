@@ -12,6 +12,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"ai-chatter/internal/analytics"
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/history"
 	"ai-chatter/internal/llm"
@@ -609,4 +610,164 @@ func (b *Bot) produceFinalTS(ctx context.Context, userID int64) (llmJSON, llm.Re
 		return llmJSON{}, llm.Response{}, false
 	}
 	return p, resp, true
+}
+
+// generateDailyReport генерирует отчёт за последние сутки
+func (b *Bot) generateDailyReport(ctx context.Context, chatID int64) error {
+	// Отправляем уведомление о начале генерации отчёта
+	b.sendMessage(chatID, "📊 Начинаю формирование отчёта об использовании бота за последние сутки...")
+
+	if b.recorder == nil {
+		return fmt.Errorf("recorder не настроен")
+	}
+
+	// Загружаем все события
+	events, err := b.recorder.LoadInteractions()
+	if err != nil {
+		return fmt.Errorf("не удалось загрузить логи: %w", err)
+	}
+
+	// Анализируем данные за вчерашний день
+	yesterday := time.Now().AddDate(0, 0, -1)
+	stats := analytics.AnalyzeDailyLogs(events, yesterday)
+
+	// Генерируем резюме для LLM
+	reportSummary := stats.GenerateReportSummary()
+
+	// Выполняем генерацию отчёта в изолированном контексте
+	currentDate := yesterday.Format("2006-01-02")
+	reportTitle := fmt.Sprintf("Отчёт за %s", currentDate)
+
+	err = b.executeReportGenerationPipeline(ctx, chatID, reportTitle, reportSummary, currentDate)
+	if err != nil {
+		return fmt.Errorf("ошибка выполнения генерации отчёта: %w", err)
+	}
+
+	return nil
+}
+
+// executeReportGenerationPipeline выполняет пошаговую генерацию отчёта в изолированном контексте
+func (b *Bot) executeReportGenerationPipeline(ctx context.Context, chatID int64, reportTitle, reportSummary, currentDate string) error {
+	// Шаг 1: Поиск страницы Reports
+	b.sendMessage(chatID, "🔍 Ищу страницу Reports в Notion...")
+
+	reportsPageID, err := b.findOrCreateReportsPage(ctx, chatID)
+	if err != nil {
+		return fmt.Errorf("не удалось найти/создать страницу Reports: %w", err)
+	}
+
+	// Шаг 2: Генерация содержимого отчёта
+	b.sendMessage(chatID, "📝 Генерирую содержимое отчёта...")
+
+	reportContent, err := b.generateReportContent(ctx, reportSummary, currentDate)
+	if err != nil {
+		return fmt.Errorf("не удалось сгенерировать содержимое отчёта: %w", err)
+	}
+
+	// Шаг 3: Создание отчёта как подстраницы
+	b.sendMessage(chatID, fmt.Sprintf("📊 Создаю отчёт '%s' в Notion...", reportTitle))
+
+	pageID, err := b.createReportPage(ctx, reportTitle, reportContent, reportsPageID)
+	if err != nil {
+		return fmt.Errorf("не удалось создать страницу отчёта: %w", err)
+	}
+
+	// Шаг 4: Уведомление о завершении
+	pageURL := fmt.Sprintf("https://notion.so/%s", pageID)
+	successMessage := fmt.Sprintf("✅ Отчёт '%s' успешно создан!\n\n🔗 Ссылка: %s", reportTitle, pageURL)
+	b.sendMessage(chatID, successMessage)
+
+	return nil
+}
+
+// findOrCreateReportsPage находит или создаёт страницу Reports
+func (b *Bot) findOrCreateReportsPage(ctx context.Context, chatID int64) (string, error) {
+	if b.mcpClient == nil {
+		return "", fmt.Errorf("MCP клиент не настроен")
+	}
+
+	// Ищем страницу Reports
+	result := b.mcpClient.SearchPagesWithID(ctx, "Reports", 5, true)
+	if result.Success && len(result.Pages) > 0 {
+		b.sendMessage(chatID, fmt.Sprintf("✅ Найдена страница Reports (ID: %s)", result.Pages[0].ID))
+		return result.Pages[0].ID, nil
+	}
+
+	// Если не найдена, создаём
+	b.sendMessage(chatID, "📄 Страница Reports не найдена, создаю новую...")
+
+	reportsContent := `# Reports
+
+Эта страница содержит автоматически генерируемые отчёты об использовании AI Chatter бота.
+
+## Автоматические отчёты
+Отчёты создаются ежедневно в 21:00 UTC и содержат:
+- Статистику сообщений и пользователей
+- Анализ использования функций MCP
+- Рекомендации по улучшению
+
+---
+*Создано автоматически*`
+
+	createResult := b.mcpClient.CreateFreeFormPage(ctx, "Reports", reportsContent, b.notionParentPage, nil)
+	if !createResult.Success {
+		return "", fmt.Errorf("не удалось создать страницу Reports: %s", createResult.Message)
+	}
+
+	b.sendMessage(chatID, fmt.Sprintf("✅ Создана страница Reports (ID: %s)", createResult.PageID))
+	return createResult.PageID, nil
+}
+
+// generateReportContent генерирует содержимое отчёта через LLM
+func (b *Bot) generateReportContent(ctx context.Context, reportSummary, currentDate string) (string, error) {
+	reportPrompt := fmt.Sprintf(`Создай подробный отчёт об использовании AI Chatter бота за %s в формате markdown.
+
+Требования к отчёту:
+1. Используй профессиональный, но дружелюбный тон
+2. Добавь анализ и выводы, а не только сухие цифры  
+3. Включи рекомендации по улучшению, если есть проблемы
+4. Структурируй отчёт с заголовками и эмодзи
+5. Отчёт должен быть информативным для администратора
+6. Отчёт должен быть не более 1700 символо в длину
+
+Статистика:
+%s
+
+Создай полный отчёт с анализом активности пользователей и использования функций бота.
+Ответ должен содержать ТОЛЬКО markdown текст отчёта, без дополнительных комментариев.`, currentDate, reportSummary)
+
+	// Изолированный контекст без истории пользователя
+	messages := []llm.Message{
+		{Role: "system", Content: "Ты — аналитик, который создаёт отчёты об использовании AI чат-бота. Отвечай только markdown текстом отчёта."},
+		{Role: "user", Content: reportPrompt},
+	}
+
+	b.logLLMRequest(b.adminUserID, "report_content_generation", messages)
+
+	resp, err := b.getLLMClient().Generate(ctx, messages)
+	if err != nil {
+		return "", fmt.Errorf("ошибка генерации содержимого: %w", err)
+	}
+
+	b.logResponse(resp)
+	return resp.Content, nil
+}
+
+// createReportPage создаёт страницу отчёта в Notion
+func (b *Bot) createReportPage(ctx context.Context, title, content, parentPageID string) (string, error) {
+	if b.mcpClient == nil {
+		return "", fmt.Errorf("MCP клиент не настроен")
+	}
+
+	result := b.mcpClient.CreateFreeFormPage(ctx, title, content, parentPageID, nil)
+	if !result.Success {
+		return "", fmt.Errorf("не удалось создать страницу отчёта: %s", result.Message)
+	}
+
+	return result.PageID, nil
+}
+
+// GenerateDailyReportForAdmin генерирует отчёт и отправляет админу (для планировщика)
+func (b *Bot) GenerateDailyReportForAdmin(ctx context.Context) error {
+	return b.generateDailyReport(ctx, b.adminUserID)
 }
