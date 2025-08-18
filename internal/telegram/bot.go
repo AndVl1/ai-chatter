@@ -12,8 +12,10 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
+	"ai-chatter/internal/agents"
 	"ai-chatter/internal/analytics"
 	"ai-chatter/internal/auth"
+	"ai-chatter/internal/gmail"
 	"ai-chatter/internal/history"
 	"ai-chatter/internal/llm"
 	"ai-chatter/internal/notion"
@@ -59,6 +61,9 @@ type Bot struct {
 	// Notion MCP client
 	mcpClient        *notion.MCPClient
 	notionParentPage string
+	// Gmail integration
+	gmailClient   *gmail.GmailMCPClient
+	gmailWorkflow *agents.GmailSummaryWorkflow
 }
 
 func New(
@@ -75,6 +80,7 @@ func New(
 	model string,
 	mcpClient *notion.MCPClient,
 	notionParentPage string,
+	gmailClient *gmail.GmailMCPClient,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
@@ -99,6 +105,17 @@ func New(
 		tzRemaining:      make(map[int64]int),
 		mcpClient:        mcpClient,
 		notionParentPage: notionParentPage,
+		gmailClient:      gmailClient,
+	}
+
+	// Инициализируем Gmail workflow если Gmail client доступен
+	if gmailClient != nil && mcpClient != nil {
+		b.gmailWorkflow = agents.NewGmailSummaryWorkflow(
+			llmClient, // Gmail agent LLM
+			llmClient, // Notion agent LLM (можно использовать отдельный)
+			gmailClient,
+			mcpClient,
+		)
 	}
 	// Try to preload model2 from file if present
 	if data, err := os.ReadFile("data/model2.txt"); err == nil {

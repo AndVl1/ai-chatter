@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # Основной бот AI Chatter с встроенным Custom MCP сервером
+  # Основной бот AI Chatter с встроенными MCP серверами
   ai-chatter-bot:
     build:
       context: .
@@ -13,8 +13,13 @@ services:
     environment:
       - NOTION_PARENT_PAGE_ID=${NOTION_PARENT_PAGE_ID}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      # Custom MCP настройки
+      # Notion MCP настройки
       - NOTION_MCP_SERVER_PATH=/app/notion-mcp-server
+      # Gmail MCP настройки
+      - GMAIL_MCP_SERVER_PATH=/app/gmail-mcp-server
+      - GMAIL_CREDENTIALS_JSON=${GMAIL_CREDENTIALS_JSON}
+      - GMAIL_CREDENTIALS_JSON_PATH=${GMAIL_CREDENTIALS_JSON_PATH}
+      - GMAIL_REFRESH_TOKEN=${GMAIL_REFRESH_TOKEN}
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs

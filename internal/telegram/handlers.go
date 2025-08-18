@@ -6,6 +6,8 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -13,6 +15,137 @@ import (
 	"ai-chatter/internal/llm"
 	"ai-chatter/internal/storage"
 )
+
+// ProgressTracker отслеживает и обновляет прогресс выполнения команд
+type ProgressTracker struct {
+	bot       *Bot
+	chatID    int64
+	messageID int
+	steps     map[string]*ProgressStep
+	mu        sync.RWMutex
+	finalURL  string
+}
+
+// ProgressStep представляет шаг выполнения с метаданными
+type ProgressStep struct {
+	Name        string
+	Description string
+	Status      string // pending, in_progress, completed, error
+	StartTime   time.Time
+	EndTime     time.Time
+}
+
+// NewProgressTracker создает новый трекер прогресса
+func NewProgressTracker(bot *Bot, chatID int64, messageID int) *ProgressTracker {
+	steps := map[string]*ProgressStep{
+		"gmail_data":         {Name: "📧 Сбор данных из Gmail", Description: "Поиск и анализ писем с автоматическими исправлениями", Status: "pending"},
+		"validate_data":      {Name: "🔍 Валидация данных", Description: "Проверка релевантности (до 5 попыток)", Status: "pending"},
+		"notion_setup":       {Name: "📝 Настройка Notion", Description: "Поиск/создание страницы Gmail summaries", Status: "pending"},
+		"generate_summary":   {Name: "🤖 Генерация саммари", Description: "AI анализ с валидацией качества (до 5 попыток)", Status: "pending"},
+		"validate_summary":   {Name: "✅ Валидация саммари", Description: "Проверка качества с автоисправлениями", Status: "pending"},
+		"create_notion_page": {Name: "📄 Создание страницы", Description: "Сохранение в Notion", Status: "pending"},
+	}
+
+	return &ProgressTracker{
+		bot:       bot,
+		chatID:    chatID,
+		messageID: messageID,
+		steps:     steps,
+	}
+}
+
+// UpdateProgress реализует интерфейс ProgressCallback
+func (pt *ProgressTracker) UpdateProgress(stepKey string, status string) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+
+	if step, exists := pt.steps[stepKey]; exists {
+		step.Status = status
+		if status == "in_progress" {
+			step.StartTime = time.Now()
+		} else if status == "completed" || status == "error" {
+			step.EndTime = time.Now()
+		}
+	}
+
+	// Обновляем сообщение
+	pt.updateMessage()
+}
+
+// SetFinalResult устанавливает финальный результат
+func (pt *ProgressTracker) SetFinalResult(pageURL string) {
+	pt.mu.Lock()
+	defer pt.mu.Unlock()
+	pt.finalURL = pageURL
+	pt.updateMessage()
+}
+
+// updateMessage обновляет сообщение с текущим прогрессом
+func (pt *ProgressTracker) updateMessage() {
+	message := pt.buildProgressMessage()
+
+	editMsg := tgbotapi.NewEditMessageText(pt.chatID, pt.messageID, message)
+	editMsg.ParseMode = pt.bot.parseModeValue()
+
+	if _, err := pt.bot.s.Send(editMsg); err != nil {
+		log.Printf("⚠️ Failed to update progress message: %v", err)
+	}
+}
+
+// buildProgressMessage формирует текст сообщения с прогрессом
+func (pt *ProgressTracker) buildProgressMessage() string {
+	var message strings.Builder
+
+	if pt.finalURL != "" {
+		// Финальное сообщение с результатом
+		message.WriteString("✅ **Gmail саммари успешно создан!**\n\n")
+		message.WriteString(fmt.Sprintf("🔗 **Ссылка на страницу в Notion:**\n%s\n\n", pt.finalURL))
+		message.WriteString("📊 **Выполненные этапы:**\n")
+	} else {
+		message.WriteString("🔄 **Обработка Gmail запроса...**\n\n")
+	}
+
+	// Добавляем информацию о шагах
+	stepOrder := []string{"gmail_data", "validate_data", "notion_setup", "generate_summary", "validate_summary", "create_notion_page"}
+
+	for _, stepKey := range stepOrder {
+		if step, exists := pt.steps[stepKey]; exists {
+			var statusIcon string
+			switch step.Status {
+			case "pending":
+				statusIcon = "⏳"
+			case "in_progress":
+				statusIcon = "🔄"
+			case "completed":
+				statusIcon = "✅"
+			case "error":
+				statusIcon = "❌"
+			default:
+				statusIcon = "❓"
+			}
+
+			message.WriteString(fmt.Sprintf("%s %s\n", statusIcon, step.Name))
+
+			// Если финальное сообщение и шаг завершен, показываем время
+			if pt.finalURL != "" && (step.Status == "completed" || step.Status == "error") && !step.EndTime.IsZero() && !step.StartTime.IsZero() {
+				duration := step.EndTime.Sub(step.StartTime)
+				if duration > 0 && duration < 24*time.Hour { // Проверяем разумные пределы
+					if duration < time.Minute {
+						message.WriteString(fmt.Sprintf("   ⏱️ %.1fs\n", duration.Seconds()))
+					} else {
+						message.WriteString(fmt.Sprintf("   ⏱️ %v\n", duration.Round(time.Second)))
+					}
+				}
+			}
+		}
+	}
+
+	if pt.finalURL == "" {
+		message.WriteString("\n💭 *Процесс может занять 30-60 секунд...*")
+	}
+
+	return message.String()
+}
 
 // handleCommand
 func (b *Bot) handleCommand(msg *tgbotapi.Message) {
@@ -31,6 +164,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 	}
 	if msg.Command() == "report" {
 		b.handleReportCommand(msg)
+		return
+	}
+	if msg.Command() == "gmail_summary" {
+		b.handleGmailSummaryCommand(msg)
 		return
 	}
 	if msg.Command() == "tz" {
@@ -402,4 +539,64 @@ func (b *Bot) handleReportCommand(msg *tgbotapi.Message) {
 		log.Printf("❌ Report generation failed: %v", err)
 		b.sendMessage(msg.Chat.ID, fmt.Sprintf("❌ Ошибка генерации отчёта: %v", err))
 	}
+}
+
+// handleGmailSummaryCommand обрабатывает команду /gmail_summary (только для админа)
+func (b *Bot) handleGmailSummaryCommand(msg *tgbotapi.Message) {
+	// Проверяем, что это админ
+	if msg.From.ID != b.adminUserID {
+		b.sendMessage(msg.Chat.ID, "❌ Команда доступна только администратору.")
+		return
+	}
+
+	// Проверяем наличие Gmail workflow
+	if b.gmailWorkflow == nil {
+		b.sendMessage(msg.Chat.ID, "❌ Gmail интеграция не настроена. Проверьте конфигурацию GMAIL_CREDENTIALS_JSON или GMAIL_CREDENTIALS_JSON_PATH.")
+		return
+	}
+
+	// Получаем текст запроса
+	userQuery := strings.TrimSpace(msg.CommandArguments())
+	if userQuery == "" {
+		b.sendMessage(msg.Chat.ID, "❌ Использование: /gmail_summary <запрос для анализа>\n\nПример: /gmail_summary что важного я пропустил за последний день")
+		return
+	}
+
+	// Отправляем начальное сообщение с прогрессом
+	initialMsg := tgbotapi.NewMessage(msg.Chat.ID, "🔄 **Обработка Gmail запроса...**\n\n⏳ Инициализация...")
+	initialMsg.ParseMode = b.parseModeValue()
+
+	sentMsg, err := b.s.Send(initialMsg)
+	if err != nil {
+		log.Printf("⚠️ Failed to send initial progress message: %v", err)
+		b.sendMessage(msg.Chat.ID, "❌ Ошибка отправки сообщения")
+		return
+	}
+
+	// Создаем progress tracker
+	progressTracker := NewProgressTracker(b, msg.Chat.ID, sentMsg.MessageID)
+
+	ctx := context.Background()
+
+	// Запускаем обработку в горутине для неблокирующего выполнения
+	go func() {
+		// Обрабатываем запрос через Gmail workflow с прогрессом
+		pageURL, err := b.gmailWorkflow.ProcessGmailSummaryRequestWithProgress(ctx, userQuery, progressTracker)
+		if err != nil {
+			log.Printf("❌ Gmail summary workflow failed: %v", err)
+			// Обновляем сообщение с ошибкой
+			errorMsg := fmt.Sprintf("❌ **Ошибка обработки Gmail запроса**\n\n%v\n\n📧 **Запрос:** %s", err, userQuery)
+			editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, errorMsg)
+			editMsg.ParseMode = b.parseModeValue()
+			if _, editErr := b.s.Send(editMsg); editErr != nil {
+				log.Printf("⚠️ Failed to update error message: %v", editErr)
+			}
+			return
+		}
+
+		// Устанавливаем финальный результат
+		progressTracker.SetFinalResult(pageURL)
+
+		log.Printf("✅ Gmail summary completed successfully: %s", pageURL)
+	}()
 }

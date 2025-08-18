@@ -12,6 +12,7 @@ import (
 
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/config"
+	"ai-chatter/internal/gmail"
 	"ai-chatter/internal/llm"
 	"ai-chatter/internal/notion"
 	"ai-chatter/internal/pending"
@@ -99,6 +100,35 @@ func main() {
 		log.Printf("NOTION_TOKEN not set, Notion functionality disabled")
 	}
 
+	// Initialize Gmail MCP client
+	var gmailClient *gmail.GmailMCPClient
+	gmailCredentials := os.Getenv("GMAIL_CREDENTIALS_JSON")
+
+	// Если не задано прямо, пытаемся прочитать из файла
+	if gmailCredentials == "" {
+		if credentialsPath := os.Getenv("GMAIL_CREDENTIALS_JSON_PATH"); credentialsPath != "" {
+			if credentialsData, err := os.ReadFile(credentialsPath); err == nil {
+				gmailCredentials = string(credentialsData)
+			}
+		}
+	}
+
+	if gmailCredentials != "" {
+		gmailClient = gmail.NewGmailMCPClient()
+
+		// Подключаемся к Gmail MCP серверу
+		ctx := context.Background()
+		if err := gmailClient.Connect(ctx, gmailCredentials); err != nil {
+			log.Printf("⚠️ Failed to connect to Gmail MCP server: %v", err)
+			log.Printf("Gmail functionality will be disabled")
+			gmailClient = nil
+		} else {
+			log.Printf("✅ Gmail MCP client connected successfully")
+		}
+	} else {
+		log.Printf("GMAIL_CREDENTIALS_JSON or GMAIL_CREDENTIALS_JSON_PATH not set, Gmail functionality disabled")
+	}
+
 	bot, err := telegram.New(
 		cfg.TelegramBotToken,
 		authSvc,
@@ -113,6 +143,7 @@ func main() {
 		model,
 		mcpClient,
 		cfg.NotionParentPage,
+		gmailClient,
 	)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)
