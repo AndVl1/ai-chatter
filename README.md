@@ -33,7 +33,7 @@ LLM_PROVIDER=openai
 TELEGRAM_BOT_TOKEN=xxx
 # Список разрешённых пользователей (ID через двоеточие)
 ALLOWED_USERS=123456789:987654321
-ADMIN_USER=000000000
+ADMIN_USER_ID=000000000
 ALLOWLIST_FILE_PATH=data/allowlist.json
 PENDING_FILE_PATH=data/pending.json
 

@@ -1,45 +1,20 @@
 version: '3.8'
 
 services:
-  notion-mcp:
-    image: mcp/notion:latest
-    container_name: ai-chatter-notion-mcp
-    restart: unless-stopped
-    environment:
-      - OPENAPI_MCP_HEADERS={"Authorization": "Bearer ${NOTION_TOKEN}", "Notion-Version": "2022-06-28"}
-    ports:
-      - "3000:3000"
-    stdin_open: true
-    tty: true
-    networks:
-      - ai-chatter-network
-
-  # Основной бот AI Chatter
+  # Основной бот AI Chatter с встроенным Custom MCP сервером
   ai-chatter-bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: ai-chatter-bot
     restart: unless-stopped
+    env_file:
+      - .env
     environment:
-      - NOTION_TOKEN=${NOTION_TOKEN}
+      - NOTION_PARENT_PAGE_ID=${NOTION_PARENT_PAGE_ID}
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - ADMIN_USER_ID=${ADMIN_USER_ID}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - YANDEX_API_KEY=${YANDEX_API_KEY}
-      - YANDEX_FOLDER_ID=${YANDEX_FOLDER_ID}
-      - YANDEX_IAM_TOKEN=${YANDEX_IAM_TOKEN}
-      # MCP настройки
-      - NOTION_MCP_ENABLED=true
-      - NOTION_MCP_URL=http://notion-mcp:3000/mcp
-    depends_on:
-      - notion-mcp
-    networks:
-      - ai-chatter-network
+      # Custom MCP настройки
+      - NOTION_MCP_SERVER_PATH=/app/notion-mcp-server
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
-
-networks:
-  ai-chatter-network:
-    driver: bridge

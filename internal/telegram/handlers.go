@@ -29,6 +29,10 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.handleNotionSearch(msg)
 		return
 	}
+	if msg.Command() == "report" {
+		b.handleReportCommand(msg)
+		return
+	}
 	if msg.Command() == "tz" {
 		if !b.authSvc.IsAllowed(msg.From.ID) {
 			return
@@ -188,6 +192,7 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 
 	if err != nil {
 		b.sendMessage(msg.Chat.ID, "Sorry, something went wrong.")
+		log.Printf("Something went wrong. %v", err)
 		return
 	}
 	b.processLLMAndRespond(ctx, msg.Chat.ID, msg.From.ID, resp)
@@ -381,5 +386,20 @@ func (b *Bot) handleNotionSearch(msg *tgbotapi.Message) {
 		b.sendMessage(msg.Chat.ID, fmt.Sprintf("🔍 Результаты поиска в Notion:\n\n%s", result.Message))
 	} else {
 		b.sendMessage(msg.Chat.ID, fmt.Sprintf("❌ Ошибка поиска в Notion: %s", result.Message))
+	}
+}
+
+// handleReportCommand обрабатывает команду /report (только для админа)
+func (b *Bot) handleReportCommand(msg *tgbotapi.Message) {
+	// Проверяем, что это админ
+	if msg.From.ID != b.adminUserID {
+		b.sendMessage(msg.Chat.ID, "❌ Команда доступна только администратору.")
+		return
+	}
+
+	ctx := context.Background()
+	if err := b.generateDailyReport(ctx, msg.Chat.ID); err != nil {
+		log.Printf("❌ Report generation failed: %v", err)
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("❌ Ошибка генерации отчёта: %v", err))
 	}
 }

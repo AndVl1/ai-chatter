@@ -4,7 +4,9 @@ import (
 	"context"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/joho/godotenv"
 
@@ -13,6 +15,7 @@ import (
 	"ai-chatter/internal/llm"
 	"ai-chatter/internal/notion"
 	"ai-chatter/internal/pending"
+	"ai-chatter/internal/scheduler"
 	"ai-chatter/internal/storage"
 	"ai-chatter/internal/telegram"
 )
@@ -115,7 +118,32 @@ func main() {
 		log.Fatalf("failed to create bot: %v", err)
 	}
 
-	bot.Start(context.Background())
+	// Инициализируем и запускаем планировщик
+	sched := scheduler.New()
+	sched.SetReportFunction(func(ctx context.Context) error {
+		return bot.GenerateDailyReportForAdmin(ctx)
+	})
+
+	if err := sched.Start(); err != nil {
+		log.Printf("⚠️ Failed to start scheduler: %v", err)
+	}
+
+	// Настраиваем graceful shutdown
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Обработка сигналов для graceful shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigChan
+		log.Println("🛑 Получен сигнал остановки, завершаем работу...")
+		sched.Stop()
+		cancel()
+	}()
+
+	bot.Start(ctx)
 }
 
 func readSystemPrompt(path string) string {

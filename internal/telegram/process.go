@@ -195,6 +195,10 @@ func enforceNumberedListIfNeeded(answer string) string {
 // buildContextWithOverflow is defined in bot.go
 
 func (b *Bot) processLLMAndRespond(ctx context.Context, chatID int64, userID int64, resp llm.Response) {
+	b.processLLMAndRespondWithMCP(ctx, chatID, userID, resp, nil)
+}
+
+func (b *Bot) processLLMAndRespondWithMCP(ctx context.Context, chatID int64, userID int64, resp llm.Response, mcpFunctionCalls []string) {
 	// log inbound
 	b.logResponse(resp)
 
@@ -264,7 +268,7 @@ func (b *Bot) processLLMAndRespond(ctx context.Context, chatID int64, userID int
 
 	// Unified final handling: send via sendFinalTS and stop
 	if b.isTZMode(userID) && status == "final" {
-		b.sendFinalTS(chatID, userID, parsed, resp)
+		b.sendFinalTSWithMCP(chatID, userID, parsed, resp, mcpFunctionCalls)
 		return
 	}
 
@@ -272,7 +276,13 @@ func (b *Bot) processLLMAndRespond(ctx context.Context, chatID int64, userID int
 	b.history.AppendAssistantWithUsed(userID, answerToSend, used)
 	if b.recorder != nil {
 		tru := true
-		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: userID, AssistantResponse: answerToSend, CanUse: &tru})
+		_ = b.recorder.AppendInteraction(storage.Event{
+			Timestamp:         time.Now().UTC(),
+			UserID:            userID,
+			AssistantResponse: answerToSend,
+			CanUse:            &tru,
+			MCPFunctionCalls:  mcpFunctionCalls,
+		})
 	}
 
 	metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
@@ -289,6 +299,10 @@ func (b *Bot) processLLMAndRespond(ctx context.Context, chatID int64, userID int
 }
 
 func (b *Bot) sendFinalTS(chatID, userID int64, p llmJSON, resp llm.Response) {
+	b.sendFinalTSWithMCP(chatID, userID, p, resp, nil)
+}
+
+func (b *Bot) sendFinalTSWithMCP(chatID, userID int64, p llmJSON, resp llm.Response, mcpFunctionCalls []string) {
 	answerToSend := p.Answer
 	if p.Title != "" {
 		answerToSend = b.formatTitleAnswer(p.Title, p.Answer)
@@ -296,7 +310,13 @@ func (b *Bot) sendFinalTS(chatID, userID int64, p llmJSON, resp llm.Response) {
 	b.history.AppendAssistantWithUsed(userID, answerToSend, true)
 	if b.recorder != nil {
 		tru := true
-		_ = b.recorder.AppendInteraction(storage.Event{Timestamp: time.Now().UTC(), UserID: userID, AssistantResponse: answerToSend, CanUse: &tru})
+		_ = b.recorder.AppendInteraction(storage.Event{
+			Timestamp:         time.Now().UTC(),
+			UserID:            userID,
+			AssistantResponse: answerToSend,
+			CanUse:            &tru,
+			MCPFunctionCalls:  mcpFunctionCalls,
+		})
 	}
 	metaLine := fmt.Sprintf("[model=%s, tokens: prompt=%d, completion=%d, total=%d]", resp.Model, resp.PromptTokens, resp.CompletionTokens, resp.TotalTokens)
 	metaEsc := b.escapeIfNeeded(metaLine)
@@ -381,6 +401,12 @@ func (b *Bot) handleFunctionCalls(ctx context.Context, chatID, userID int64, too
 
 	// Собираем результаты всех tool calls
 	toolResults := make([]llm.ToolCallResult, 0, len(toolCalls))
+
+	// Собираем названия вызванных функций для логирования
+	mcpFunctionCalls := make([]string, 0, len(toolCalls))
+	for _, tc := range toolCalls {
+		mcpFunctionCalls = append(mcpFunctionCalls, tc.Function.Name)
+	}
 
 	for _, tc := range toolCalls {
 		switch tc.Function.Name {
@@ -640,12 +666,25 @@ func (b *Bot) handleFunctionCalls(ctx context.Context, chatID, userID int64, too
 
 	// Теперь отправляем результаты обратно в LLM для формирования ответа
 	if len(toolResults) > 0 {
-		b.continueConversationWithToolResults(ctx, chatID, userID, toolResults)
+		b.continueConversationWithToolResults(ctx, chatID, userID, toolResults, mcpFunctionCalls)
 	}
 }
 
 // continueConversationWithToolResults продолжает диалог с результатами tool calls
-func (b *Bot) continueConversationWithToolResults(ctx context.Context, chatID, userID int64, toolResults []llm.ToolCallResult) {
+func (b *Bot) continueConversationWithToolResults(ctx context.Context, chatID, userID int64, toolResults []llm.ToolCallResult, mcpFunctionCalls []string) {
+	b.continueConversationWithToolResultsRecursive(ctx, chatID, userID, toolResults, mcpFunctionCalls, 0)
+}
+
+// continueConversationWithToolResultsRecursive обрабатывает цепочки function calls рекурсивно
+func (b *Bot) continueConversationWithToolResultsRecursive(ctx context.Context, chatID, userID int64, toolResults []llm.ToolCallResult, mcpFunctionCalls []string, depth int) {
+	// Ограничиваем глубину рекурсии для предотвращения бесконечных циклов
+	const maxDepth = 5
+	if depth >= maxDepth {
+		log.Printf("⚠️ Достигнута максимальная глубина function calls (%d), прекращаем цепочку", maxDepth)
+		b.sendMessage(chatID, "✅ Операции выполнены успешно.")
+		return
+	}
+
 	// Получаем текущий контекст
 	contextMsgs := b.buildContextWithOverflow(ctx, userID)
 
@@ -658,24 +697,265 @@ func (b *Bot) continueConversationWithToolResults(ctx context.Context, chatID, u
 		})
 	}
 
-	// Добавляем инструкцию для LLM
+	// Настраиваем инструкцию в зависимости от глубины
+	var systemInstruction string
+	if depth == 0 {
+		systemInstruction = "Проанализируй результаты выполненных действий. АВТОМАТИЧЕСКИ продолжай выполнение задачи:\n\n- Если найдена страница 'Reports', создай в ней подстраницу с отчётом\n- Если нужно создать страницу Reports, создай её и затем отчёт\n- Если создаёшь отчёт, используй полную статистику и анализ\n- НЕ спрашивай разрешения, выполняй действия автоматически\n\nЕсли все действия завершены, сообщи о результате с ссылкой на созданную страницу."
+	} else {
+		systemInstruction = "Продолжай автоматическое выполнение задачи на основе предыдущих результатов. НЕ останавливайся, пока задача не будет полностью завершена. Если все действия завершены, сформулируй финальный ответ пользователю."
+	}
+
 	contextMsgs = append(contextMsgs, llm.Message{
 		Role:    "system",
-		Content: "Проанализируй результаты выполненных действий и сформулируй краткий ответ пользователю. Сообщи о статусе выполнения, но не дублируй всю техническую информацию.",
+		Content: systemInstruction,
 	})
 
-	b.logLLMRequest(userID, "tool_response", contextMsgs)
+	b.logLLMRequest(userID, fmt.Sprintf("tool_response_depth_%d", depth), contextMsgs)
 
-	// Получаем ответ от LLM с tools (как в обычных запросах)
+	// Получаем ответ от LLM с tools
 	tools := llm.GetNotionTools()
 	resp, err := b.getLLMClient().GenerateWithTools(ctx, contextMsgs, tools)
 	if err != nil {
-		b.sendMessage(chatID, fmt.Sprintf("Действия выполнены, но произошла ошибка формирования ответа :%v", err))
+		b.sendMessage(chatID, fmt.Sprintf("Действия выполнены, но произошла ошибка формирования ответа: %v", err))
 		return
 	}
 
-	// Обрабатываем ответ как обычно
-	b.processLLMAndRespond(ctx, chatID, userID, resp)
+	// Если есть новые function calls, обрабатываем их рекурсивно
+	if len(resp.ToolCalls) > 0 {
+		log.Printf("🔄 Обработка дополнительных function calls на глубине %d", depth+1)
+
+		// Собираем результаты новых tool calls
+		newToolResults := make([]llm.ToolCallResult, 0, len(resp.ToolCalls))
+		newMCPFunctionCalls := make([]string, 0, len(resp.ToolCalls))
+
+		for _, tc := range resp.ToolCalls {
+			newMCPFunctionCalls = append(newMCPFunctionCalls, tc.Function.Name)
+		}
+
+		// Выполняем новые function calls
+		if b.mcpClient != nil {
+			for _, tc := range resp.ToolCalls {
+				result := b.executeSingleFunctionCall(ctx, chatID, userID, tc)
+				newToolResults = append(newToolResults, result)
+			}
+		}
+
+		// Объединяем с предыдущими вызовами для логирования
+		allMCPCalls := append(mcpFunctionCalls, newMCPFunctionCalls...)
+
+		// Рекурсивно продолжаем с новыми результатами
+		b.continueConversationWithToolResultsRecursive(ctx, chatID, userID, newToolResults, allMCPCalls, depth+1)
+		return
+	}
+
+	// Нет новых function calls - завершаем цепочку
+	b.processLLMAndRespondWithMCP(ctx, chatID, userID, resp, mcpFunctionCalls)
+}
+
+// executeSingleFunctionCall выполняет один вызов функции и возвращает результат
+func (b *Bot) executeSingleFunctionCall(ctx context.Context, chatID, userID int64, tc llm.ToolCall) llm.ToolCallResult {
+	switch tc.Function.Name {
+	case "save_dialog_to_notion":
+		title, ok := tc.Function.Arguments["title"].(string)
+		if !ok || title == "" {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    "Ошибка: не указано название страницы",
+			}
+		}
+
+		// Собираем контекст диалога
+		history := b.history.Get(userID)
+		if len(history) == 0 {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    "Ошибка: история диалога пуста",
+			}
+		}
+
+		// Формируем содержимое страницы
+		var content strings.Builder
+		for _, msg := range history {
+			if msg.Role == "user" {
+				content.WriteString(fmt.Sprintf("**Пользователь:** %s\n\n", msg.Content))
+			} else if msg.Role == "assistant" {
+				content.WriteString(fmt.Sprintf("**Ассистент:** %s\n\n", msg.Content))
+			}
+		}
+
+		// Проверяем настройку parent page
+		if b.notionParentPage == "" {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    "Ошибка: не настроен NOTION_PARENT_PAGE_ID",
+			}
+		}
+
+		result := b.mcpClient.CreateDialogSummary(
+			ctx, title, content.String(),
+			fmt.Sprintf("%d", userID),
+			getUsernameFromID(userID),
+			"dialog_summary",
+			b.notionParentPage,
+		)
+
+		if result.Success {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    fmt.Sprintf("Диалог успешно сохранён в Notion под названием '%s'. Page ID: %s", title, result.PageID),
+			}
+		} else {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    fmt.Sprintf("Ошибка сохранения: %s", result.Message),
+			}
+		}
+
+	case "create_notion_page":
+		title, ok := tc.Function.Arguments["title"].(string)
+		if !ok || title == "" {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    "Ошибка: не указано название страницы",
+			}
+		}
+
+		content, ok := tc.Function.Arguments["content"].(string)
+		if !ok || content == "" {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    "Ошибка: не указано содержимое страницы",
+			}
+		}
+
+		// Поддерживаем и старый parent_page и новый parent_page_id
+		parentPage, _ := tc.Function.Arguments["parent_page"].(string)
+		parentPageID, _ := tc.Function.Arguments["parent_page_id"].(string)
+
+		// Приоритет у parent_page_id
+		if parentPageID != "" {
+			parentPage = parentPageID
+		} else if parentPage == "" {
+			// Если не указан ни parent_page, ни parent_page_id, используем default
+			if b.notionParentPage == "" {
+				return llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    "Ошибка: не настроен NOTION_PARENT_PAGE_ID",
+				}
+			}
+			parentPage = b.notionParentPage
+		}
+
+		result := b.mcpClient.CreateFreeFormPage(ctx, title, content, parentPage, nil)
+
+		if result.Success {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    fmt.Sprintf("Страница '%s' успешно создана в Notion. Page ID: %s", title, result.PageID),
+			}
+		} else {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    fmt.Sprintf("Ошибка создания страницы: %s", result.Message),
+			}
+		}
+
+	case "search_pages_with_id":
+		query, ok := tc.Function.Arguments["query"].(string)
+		if !ok || query == "" {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    "Ошибка: не указан поисковый запрос",
+			}
+		}
+
+		// Извлекаем параметры
+		var limit int
+		if limitVal, ok := tc.Function.Arguments["limit"].(float64); ok {
+			limit = int(limitVal)
+		}
+
+		exactMatch := false
+		if exactVal, ok := tc.Function.Arguments["exact_match"].(bool); ok {
+			exactMatch = exactVal
+		}
+
+		result := b.mcpClient.SearchPagesWithID(ctx, query, limit, exactMatch)
+
+		if result.Success {
+			if len(result.Pages) == 0 {
+				return llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    fmt.Sprintf("Страницы по запросу '%s' не найдены", query),
+				}
+			} else {
+				responseText := fmt.Sprintf("Найдено %d страниц по запросу '%s':", len(result.Pages), query)
+				for i, page := range result.Pages {
+					responseText += fmt.Sprintf("\n%d. %s (ID: %s)", i+1, page.Title, page.ID)
+				}
+				return llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    responseText,
+				}
+			}
+		} else {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    fmt.Sprintf("Ошибка поиска страниц: %s", result.Message),
+			}
+		}
+
+	case "list_available_pages":
+		// Извлекаем параметры
+		var limit int
+		if limitVal, ok := tc.Function.Arguments["limit"].(float64); ok {
+			limit = int(limitVal)
+		}
+
+		pageType := ""
+		if typeVal, ok := tc.Function.Arguments["page_type"].(string); ok {
+			pageType = typeVal
+		}
+
+		parentOnly := false
+		if parentVal, ok := tc.Function.Arguments["parent_only"].(bool); ok {
+			parentOnly = parentVal
+		}
+
+		result := b.mcpClient.ListAvailablePages(ctx, limit, pageType, parentOnly)
+
+		if result.Success {
+			if len(result.Pages) == 0 {
+				return llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    "📋 Доступные страницы не найдены",
+				}
+			} else {
+				responseText := fmt.Sprintf("📋 Найдено %d доступных страниц:", len(result.Pages))
+				for i, page := range result.Pages {
+					responseText += fmt.Sprintf("\n%d. %s (ID: %s)", i+1, page.Title, page.ID)
+					if page.CanBeParent {
+						responseText += " ✅"
+					}
+				}
+				return llm.ToolCallResult{
+					ToolCallID: tc.ID,
+					Content:    responseText,
+				}
+			}
+		} else {
+			return llm.ToolCallResult{
+				ToolCallID: tc.ID,
+				Content:    fmt.Sprintf("Ошибка получения списка страниц: %s", result.Message),
+			}
+		}
+
+	default:
+		return llm.ToolCallResult{
+			ToolCallID: tc.ID,
+			Content:    fmt.Sprintf("Неизвестная функция: %s", tc.Function.Name),
+		}
+	}
 }
 
 // getUsernameFromID возвращает имя пользователя по ID (упрощённая версия)
