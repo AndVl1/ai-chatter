@@ -870,3 +870,4 @@ docker-compose up -d
 - Добавлен `generateReportContent()` для изолированной генерации содержимого
 - Добавлен `createReportPage()` для прямого создания отчёта
 - Улучшены системные инструкции в `continueConversationWithToolResultsRecursive()`
+- **Очищена документация**: удалены устаревшие файлы `docs/mcp-setup.md`, `docs/docker-mcp-setup.md`, `docs/notion-parent-page-setup.md`
