@@ -15,6 +15,10 @@ import (
 
 type fakeSender struct{ sent []string }
 
+func (fs *fakeSender) GetFile(config tgbotapi.FileConfig) (tgbotapi.File, error) {
+	return tgbotapi.File{}, nil
+}
+
 type fakeLLM struct {
 	resp llm.Response
 	err  error

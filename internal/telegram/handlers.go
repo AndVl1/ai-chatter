@@ -1,9 +1,16 @@
 package telegram
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -12,6 +19,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
 	"ai-chatter/internal/auth"
+	"ai-chatter/internal/codevalidation"
 	"ai-chatter/internal/llm"
 	"ai-chatter/internal/storage"
 )
@@ -317,6 +325,29 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 	}
 	b.logLLMRequest(msg.From.ID, "chat", contextMsgs)
 
+	// Проверяем наличие файлов или архивов
+	if b.codeValidationWorkflow != nil && !b.isTZMode(msg.From.ID) && msg.Document != nil {
+		log.Printf("🔍 Document detected: %s", msg.Document.FileName)
+		b.handleDocumentValidation(ctx, msg)
+		return
+	}
+
+	// Проверяем наличие кода в сообщении перед обычной обработкой
+	if b.codeValidationWorkflow != nil && !b.isTZMode(msg.From.ID) {
+		hasCode, extractedCode, filename, userQuestion, codeErr := codevalidation.DetectCodeInMessage(ctx, b.getLLMClient(), msg.Text)
+		if codeErr != nil {
+			log.Printf("⚠️ Code detection failed: %v", codeErr)
+		} else if hasCode {
+			log.Printf("🔍 Code detected in message, triggering validation mode")
+			if userQuestion != "" {
+				log.Printf("❓ User question detected: %s", userQuestion)
+			}
+			// Запускаем валидацию кода вместо обычной обработки
+			b.handleCodeValidation(ctx, msg, extractedCode, filename, userQuestion)
+			return
+		}
+	}
+
 	// Используем инструменты Notion только если клиент настроен и не в режиме ТЗ
 	var resp llm.Response
 	var err error
@@ -599,4 +630,282 @@ func (b *Bot) handleGmailSummaryCommand(msg *tgbotapi.Message) {
 
 		log.Printf("✅ Gmail summary completed successfully: %s", pageURL)
 	}()
+}
+
+// handleDocumentValidation обрабатывает валидацию загруженных файлов и архивов
+func (b *Bot) handleDocumentValidation(ctx context.Context, msg *tgbotapi.Message) {
+	log.Printf("🔍 Starting document validation for user %d, file: %s", msg.From.ID, msg.Document.FileName)
+
+	// Проверяем наличие code validation workflow
+	if b.codeValidationWorkflow == nil {
+		b.sendMessage(msg.Chat.ID, "❌ Валидация кода недоступна. Проверьте конфигурацию Docker.")
+		return
+	}
+
+	// Получаем файл от Telegram
+	file, err := b.s.GetFile(tgbotapi.FileConfig{FileID: msg.Document.FileID})
+	if err != nil {
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("❌ Ошибка получения файла: %v", err))
+		return
+	}
+
+	// Отправляем начальное сообщение с прогрессом
+	initialMsg := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("🔄 **Запуск валидации файла...**\n\n📄 **Файл:** %s\n⏳ Инициализация...", msg.Document.FileName))
+	initialMsg.ParseMode = b.parseModeValue()
+
+	sentMsg, err := b.s.Send(initialMsg)
+	if err != nil {
+		log.Printf("⚠️ Failed to send initial document validation message: %v", err)
+		b.sendMessage(msg.Chat.ID, "❌ Ошибка отправки сообщения")
+		return
+	}
+
+	// Создаем progress tracker
+	progressTracker := codevalidation.NewCodeValidationProgressTracker(b, msg.Chat.ID, sentMsg.MessageID, msg.Document.FileName, "")
+
+	// Запускаем валидацию в горутине для неблокирующего выполнения
+	go func() {
+		// Загружаем и обрабатываем файл
+		files, err := b.downloadAndProcessFile(file, msg.Document.FileName)
+		if err != nil {
+			log.Printf("❌ File processing failed: %v", err)
+			errorMsg := fmt.Sprintf("❌ **Ошибка обработки файла**\n\n%v\n\n📄 **Файл:** %s", err, msg.Document.FileName)
+			editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, errorMsg)
+			editMsg.ParseMode = b.parseModeValue()
+			if _, editErr := b.s.Send(editMsg); editErr != nil {
+				log.Printf("⚠️ Failed to update error message: %v", editErr)
+			}
+			return
+		}
+
+		// Обрабатываем запрос через Code Validation workflow с прогрессом
+		// При загрузке файла документа пользовательский вопрос пока не поддерживается
+		// TODO: в будущем можно извлекать вопрос из описания к файлу
+		result, err := b.codeValidationWorkflow.ProcessProjectValidationWithQuestion(ctx, files, "", progressTracker)
+		if err != nil {
+			log.Printf("❌ Document validation workflow failed: %v", err)
+			// Обновляем сообщение с ошибкой
+			errorMsg := fmt.Sprintf("❌ **Ошибка валидации файла**\n\n%v\n\n📄 **Файл:** %s", err, msg.Document.FileName)
+			editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, errorMsg)
+			editMsg.ParseMode = b.parseModeValue()
+			if _, editErr := b.s.Send(editMsg); editErr != nil {
+				log.Printf("⚠️ Failed to update error message: %v", editErr)
+			}
+			return
+		}
+
+		// Устанавливаем финальный результат
+		progressTracker.SetFinalResult(result)
+
+		log.Printf("✅ Document validation completed successfully for: %s", msg.Document.FileName)
+	}()
+}
+
+// handleCodeValidation обрабатывает валидацию кода с пользовательским вопросом
+func (b *Bot) handleCodeValidation(ctx context.Context, msg *tgbotapi.Message, code, filename, userQuestion string) {
+	log.Printf("🔍 Starting code validation for user %d", msg.From.ID)
+
+	// Проверяем наличие code validation workflow
+	if b.codeValidationWorkflow == nil {
+		b.sendMessage(msg.Chat.ID, "❌ Валидация кода недоступна. Проверьте конфигурацию Docker.")
+		return
+	}
+
+	// Отправляем начальное сообщение с прогрессом
+	initialMsg := tgbotapi.NewMessage(msg.Chat.ID, "🔄 **Запуск валидации кода...**\n\n⏳ Инициализация...")
+	initialMsg.ParseMode = b.parseModeValue()
+
+	sentMsg, err := b.s.Send(initialMsg)
+	if err != nil {
+		log.Printf("⚠️ Failed to send initial code validation message: %v", err)
+		b.sendMessage(msg.Chat.ID, "❌ Ошибка отправки сообщения")
+		return
+	}
+
+	// Создаем progress tracker
+	progressTracker := codevalidation.NewCodeValidationProgressTracker(b, msg.Chat.ID, sentMsg.MessageID, filename, "")
+
+	// Запускаем валидацию в горутине для неблокирующего выполнения
+	go func() {
+		// Обрабатываем запрос через Code Validation workflow с прогрессом и пользовательским вопросом
+		files := map[string]string{filename: code}
+		result, err := b.codeValidationWorkflow.ProcessProjectValidationWithQuestion(ctx, files, userQuestion, progressTracker)
+		if err != nil {
+			log.Printf("❌ Code validation workflow failed: %v", err)
+			// Обновляем сообщение с ошибкой
+			errorMsg := fmt.Sprintf("❌ **Ошибка валидации кода**\n\n%v\n\n📄 **Файл:** %s", err, filename)
+			editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, errorMsg)
+			editMsg.ParseMode = b.parseModeValue()
+			if _, editErr := b.s.Send(editMsg); editErr != nil {
+				log.Printf("⚠️ Failed to update error message: %v", editErr)
+			}
+			return
+		}
+
+		// Устанавливаем финальный результат
+		progressTracker.SetFinalResult(result)
+
+		log.Printf("✅ Code validation completed successfully for: %s", filename)
+	}()
+}
+
+// downloadAndProcessFile скачивает файл от Telegram и обрабатывает его (включая архивы)
+func (b *Bot) downloadAndProcessFile(file tgbotapi.File, filename string) (map[string]string, error) {
+	log.Printf("📥 Downloading file: %s", filename)
+
+	// Скачиваем файл
+	fileURL := file.Link(b.api.Token)
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		return nil, fmt.Errorf("failed to download file: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Читаем весь контент файла в память
+	content, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read file content: %w", err)
+	}
+
+	log.Printf("📁 Processing file: %s, size: %d bytes", filename, len(content))
+
+	// Определяем тип файла и обрабатываем соответственно
+	ext := strings.ToLower(filepath.Ext(filename))
+
+	switch ext {
+	case ".zip":
+		return b.processZipArchive(content, filename)
+	case ".tar":
+		return b.processTarArchive(content, filename)
+	case ".gz":
+		if strings.HasSuffix(strings.ToLower(filename), ".tar.gz") {
+			return b.processTarGzArchive(content, filename)
+		}
+		fallthrough
+	default:
+		// Обычный файл - просто возвращаем его содержимое
+		return map[string]string{filename: string(content)}, nil
+	}
+}
+
+// processZipArchive обрабатывает ZIP архивы
+func (b *Bot) processZipArchive(data []byte, filename string) (map[string]string, error) {
+	log.Printf("📦 Processing ZIP archive: %s", filename)
+
+	// Создаем reader для zip данных
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return nil, fmt.Errorf("failed to read ZIP archive: %w", err)
+	}
+
+	files := make(map[string]string)
+	maxFiles := 50 // Ограничиваем количество файлов для безопасности
+	fileCount := 0
+
+	for _, f := range reader.File {
+		if fileCount >= maxFiles {
+			log.Printf("⚠️ ZIP archive contains too many files, limiting to %d", maxFiles)
+			break
+		}
+
+		// Пропускаем директории и скрытые файлы
+		if f.FileInfo().IsDir() || strings.HasPrefix(filepath.Base(f.Name), ".") {
+			continue
+		}
+
+		// Пропускаем слишком большие файлы
+		if f.UncompressedSize64 > 1024*1024 { // 1MB limit
+			log.Printf("⚠️ Skipping large file: %s (%d bytes)", f.Name, f.UncompressedSize64)
+			continue
+		}
+
+		// Читаем файл
+		rc, err := f.Open()
+		if err != nil {
+			log.Printf("⚠️ Failed to open file %s in ZIP: %v", f.Name, err)
+			continue
+		}
+
+		content, err := io.ReadAll(rc)
+		rc.Close()
+		if err != nil {
+			log.Printf("⚠️ Failed to read file %s in ZIP: %v", f.Name, err)
+			continue
+		}
+
+		files[f.Name] = string(content)
+		fileCount++
+	}
+
+	log.Printf("✅ Extracted %d files from ZIP archive", fileCount)
+	return files, nil
+}
+
+// processTarArchive обрабатывает TAR архивы
+func (b *Bot) processTarArchive(data []byte, filename string) (map[string]string, error) {
+	log.Printf("📦 Processing TAR archive: %s", filename)
+
+	reader := tar.NewReader(bytes.NewReader(data))
+	files := make(map[string]string)
+	maxFiles := 50 // Ограничиваем количество файлов для безопасности
+	fileCount := 0
+
+	for {
+		if fileCount >= maxFiles {
+			log.Printf("⚠️ TAR archive contains too many files, limiting to %d", maxFiles)
+			break
+		}
+
+		header, err := reader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, fmt.Errorf("failed to read TAR entry: %w", err)
+		}
+
+		// Пропускаем директории и скрытые файлы
+		if header.Typeflag == tar.TypeDir || strings.HasPrefix(filepath.Base(header.Name), ".") {
+			continue
+		}
+
+		// Пропускаем слишком большие файлы
+		if header.Size > 1024*1024 { // 1MB limit
+			log.Printf("⚠️ Skipping large file: %s (%d bytes)", header.Name, header.Size)
+			continue
+		}
+
+		content, err := io.ReadAll(reader)
+		if err != nil {
+			log.Printf("⚠️ Failed to read file %s in TAR: %v", header.Name, err)
+			continue
+		}
+
+		files[header.Name] = string(content)
+		fileCount++
+	}
+
+	log.Printf("✅ Extracted %d files from TAR archive", fileCount)
+	return files, nil
+}
+
+// processTarGzArchive обрабатывает TAR.GZ архивы
+func (b *Bot) processTarGzArchive(data []byte, filename string) (map[string]string, error) {
+	log.Printf("📦 Processing TAR.GZ archive: %s", filename)
+
+	// Сначала распаковываем gzip
+	gzipReader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer gzipReader.Close()
+
+	// Читаем распакованные данные
+	uncompressedData, err := io.ReadAll(gzipReader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read gzip data: %w", err)
+	}
+
+	// Теперь обрабатываем как обычный TAR
+	return b.processTarArchive(uncompressedData, filename)
 }

@@ -1,13 +1,24 @@
 version: '3.8'
 
 services:
-  # Основной бот AI Chatter с встроенными MCP серверами
+  # Основной бот AI Chatter с встроенными MCP серверами и Docker-in-Docker
   ai-chatter-bot:
     build:
       context: .
       dockerfile: Dockerfile
     container_name: ai-chatter-bot
     restart: unless-stopped
+    # Привилегированный режим требуется для Docker-in-Docker
+    privileged: true
+    # Добавляем capabilities для Docker
+    cap_add:
+      - SYS_ADMIN
+    # Монтируем /sys/fs/cgroup для systemd в контейнере (если нужно)
+    tmpfs:
+      - /tmp
+      - /run
+      - /run/lock
+    # Переменные окружения
     env_file:
       - .env
     environment:
@@ -20,6 +31,27 @@ services:
       - GMAIL_CREDENTIALS_JSON=${GMAIL_CREDENTIALS_JSON}
       - GMAIL_CREDENTIALS_JSON_PATH=${GMAIL_CREDENTIALS_JSON_PATH}
       - GMAIL_REFRESH_TOKEN=${GMAIL_REFRESH_TOKEN}
+      # Docker daemon настройки
+      - DOCKER_TLS_CERTDIR=
+      - DOCKER_HOST=unix:///var/run/docker.sock
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
+      # Том для Docker данных (образы, контейнеры и т.д.)
+      - ai-chatter-docker-data:/var/lib/docker
+      # Сокет Docker daemon (альтернативный способ для некоторых setup)
+      # - /var/run/docker.sock:/var/run/docker.sock
+    # Указываем лимиты ресурсов для предотвращения перегрузки
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+# Именованный volume для Docker данных
+volumes:
+  ai-chatter-docker-data:
+    driver: local

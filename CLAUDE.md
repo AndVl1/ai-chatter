@@ -25,3 +25,5 @@ You must follow these architectural constraints:
 - If the user asks about something unrelated to your scope, keep the conversation polite and brief, and gently redirect toward relevant topics.
 
 - Save all changes in file CHANGELOG.md in root directory. If there is no such file, create it.
+
+- If there are possible breaking changes in new code, check for its assembly and unit-tests running.
