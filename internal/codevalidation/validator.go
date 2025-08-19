@@ -39,6 +39,7 @@ type CodeAnalysisResult struct {
 	Commands        []string `json:"commands"`
 	DockerImage     string   `json:"docker_image"`
 	ProjectType     string   `json:"project_type,omitempty"`
+	WorkingDir      string   `json:"working_dir,omitempty"` // Относительный путь к рабочей директории внутри /workspace
 	Reasoning       string   `json:"reasoning"`
 }
 
@@ -181,14 +182,70 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 	return lastResult, nil
 }
 
+// createContainerWithRetry создает контейнер с повторными попытками
+func (w *CodeValidationWorkflow) createContainerWithRetry(ctx context.Context, analysis *CodeAnalysisResult) (string, error) {
+	const maxRetries = 3
+	var lastErr error
+
+	for retryAttempt := 1; retryAttempt <= maxRetries; retryAttempt++ {
+		log.Printf("🐳 Creating container attempt %d/%d", retryAttempt, maxRetries)
+
+		containerID, err := w.dockerClient.CreateContainer(ctx, analysis)
+		if err == nil {
+			log.Printf("✅ Container created successfully on attempt %d", retryAttempt)
+			return containerID, nil
+		}
+
+		lastErr = err
+		log.Printf("❌ Container creation attempt %d failed: %v", retryAttempt, err)
+
+		if retryAttempt < maxRetries {
+			log.Printf("🔄 Waiting before retry...")
+			time.Sleep(time.Duration(retryAttempt) * time.Second) // Exponential backoff
+		}
+	}
+
+	return "", fmt.Errorf("failed to create container after %d attempts: %w", maxRetries, lastErr)
+}
+
+// installDependenciesWithRetry устанавливает зависимости с повторными попытками
+func (w *CodeValidationWorkflow) installDependenciesWithRetry(ctx context.Context, containerID string, analysis *CodeAnalysisResult) error {
+	if len(analysis.InstallCommands) == 0 {
+		return nil
+	}
+
+	const maxRetries = 3
+	var lastErr error
+
+	for retryAttempt := 1; retryAttempt <= maxRetries; retryAttempt++ {
+		log.Printf("📦 Installing dependencies attempt %d/%d", retryAttempt, maxRetries)
+
+		err := w.dockerClient.InstallDependencies(ctx, containerID, analysis)
+		if err == nil {
+			log.Printf("✅ Dependencies installed successfully on attempt %d", retryAttempt)
+			return nil
+		}
+
+		lastErr = err
+		log.Printf("❌ Dependencies installation attempt %d failed: %v", retryAttempt, err)
+
+		if retryAttempt < maxRetries {
+			log.Printf("🔄 Waiting before retry...")
+			time.Sleep(time.Duration(retryAttempt) * time.Second) // Exponential backoff
+		}
+	}
+
+	return fmt.Errorf("failed to install dependencies after %d attempts: %w", maxRetries, lastErr)
+}
+
 // executeValidationWithRetry выполняет валидацию с повторными попытками
 func (w *CodeValidationWorkflow) executeValidationWithRetry(ctx context.Context, files map[string]string, analysis *CodeAnalysisResult, progressCallback ProgressCallback, attempt int) (*ValidationResult, error) {
-	// Шаг 2: Подготовка Docker окружения
+	// Шаг 2: Подготовка Docker окружения с retry
 	if progressCallback != nil {
 		progressCallback.UpdateProgress("docker_setup", "in_progress")
 	}
 
-	containerID, err := w.dockerClient.CreateContainer(ctx, analysis)
+	containerID, err := w.createContainerWithRetry(ctx, analysis)
 	if err != nil {
 		if progressCallback != nil {
 			progressCallback.UpdateProgress("docker_setup", "error")
@@ -207,26 +264,7 @@ func (w *CodeValidationWorkflow) executeValidationWithRetry(ctx context.Context,
 		progressCallback.UpdateProgress("docker_setup", "completed")
 	}
 
-	// Шаг 3: Установка зависимостей
-	if len(analysis.InstallCommands) > 0 {
-		if progressCallback != nil {
-			progressCallback.UpdateProgress("install_deps", "in_progress")
-		}
-
-		err = w.dockerClient.InstallDependencies(ctx, containerID, analysis)
-		if err != nil {
-			if progressCallback != nil {
-				progressCallback.UpdateProgress("install_deps", "error")
-			}
-			return nil, fmt.Errorf("failed to install dependencies: %w", err)
-		}
-
-		if progressCallback != nil {
-			progressCallback.UpdateProgress("install_deps", "completed")
-		}
-	}
-
-	// Шаг 4: Копирование файлов проекта в контейнер
+	// Шаг 3: Копирование файлов проекта в контейнер (ПЕРЕД установкой зависимостей!)
 	if progressCallback != nil {
 		progressCallback.UpdateProgress("copy_code", "in_progress")
 	}
@@ -241,6 +279,25 @@ func (w *CodeValidationWorkflow) executeValidationWithRetry(ctx context.Context,
 
 	if progressCallback != nil {
 		progressCallback.UpdateProgress("copy_code", "completed")
+	}
+
+	// Шаг 4: Установка зависимостей с retry (ПОСЛЕ копирования файлов!)
+	if len(analysis.InstallCommands) > 0 {
+		if progressCallback != nil {
+			progressCallback.UpdateProgress("install_deps", "in_progress")
+		}
+
+		err = w.installDependenciesWithRetry(ctx, containerID, analysis)
+		if err != nil {
+			if progressCallback != nil {
+				progressCallback.UpdateProgress("install_deps", "error")
+			}
+			return nil, fmt.Errorf("failed to install dependencies: %w", err)
+		}
+
+		if progressCallback != nil {
+			progressCallback.UpdateProgress("install_deps", "completed")
+		}
 	}
 
 	// Шаг 5: Выполнение валидации
@@ -283,6 +340,24 @@ func (w *CodeValidationWorkflow) analyzeProject(ctx context.Context, files map[s
 
 	systemPrompt := `You are a code analysis agent. Analyze the provided project files and determine the SIMPLEST way to validate the code.
 
+CRITICAL EXECUTION CONTEXT:
+- All files will be copied to /workspace directory in the Docker container
+- You need to determine the correct working_dir within /workspace where the project should run
+- If files are in a subdirectory (e.g. extracted from archive), specify working_dir (e.g. "project-name")
+- All commands (install_commands and validation commands) will be executed in /workspace/working_dir
+- Use relative paths or assume files are in the current working directory
+- DO NOT use absolute paths like /workspace/file.py - use just file.py
+
+WORKING DIRECTORY ANALYSIS:
+- Look at file paths to determine project structure
+- ONLY set working_dir if ALL files are in the SAME subdirectory
+- If files have different directory paths, keep working_dir empty and use relative paths
+- Examples:
+  * Files: "project/src/main.py", "project/build.gradle" → working_dir: "project"
+  * Files: "src/main.py", "build.gradle" → working_dir: "" (files are at different levels)
+  * Files: "main.py", "requirements.txt" → working_dir: "" (files are at root level)
+- BE CONSERVATIVE: when in doubt, use working_dir: ""
+
 CRITICAL PRINCIPLE: Choose the SIMPLEST build/validation approach possible:
 - Single Kotlin file → Use kotlinc (NOT Gradle)
 - Single Java file → Use javac (NOT Maven/Gradle) 
@@ -310,6 +385,7 @@ You MUST respond with valid JSON in this EXACT format. Do NOT include markdown c
   "install_commands": ["install command1", "install command2"],
   "commands": ["validation command1", "validation command2"],
   "docker_image": "appropriate docker base image",
+  "working_dir": "relative path within /workspace (empty for root, e.g. 'project-name' for subdirectory)",
   "reasoning": "explanation of choices made and why this is the simplest approach"
 }
 
@@ -323,6 +399,7 @@ Single Kotlin file (NO Gradle needed):
   "install_commands": [],
   "commands": ["kotlinc hello.kt -include-runtime -d hello.jar", "java -jar hello.jar"],
   "docker_image": "openjdk:11-slim",
+  "working_dir": "",
   "reasoning": "Single Kotlin file - using kotlinc directly instead of Gradle for simplicity"
 }
 
@@ -334,6 +411,7 @@ Single Java file (NO Maven needed):
   "install_commands": [],
   "commands": ["javac *.java", "java Main"],
   "docker_image": "openjdk:11-slim",
+  "working_dir": "",
   "reasoning": "Single Java file - using javac directly instead of build system"
 }
 
@@ -345,6 +423,7 @@ Python script (NO pip install needed):
   "install_commands": [],
   "commands": ["python -m py_compile *.py", "python main.py"],
   "docker_image": "python:3.11-slim",
+  "working_dir": "",
   "reasoning": "Simple Python script with no external dependencies"
 }
 
@@ -356,6 +435,7 @@ C++ single file:
   "install_commands": ["apt-get update && apt-get install -y g++"],
   "commands": ["g++ -o program *.cpp", "./program"],
   "docker_image": "debian:bullseye-slim",
+  "working_dir": "",
   "reasoning": "Single C++ file - direct compilation with g++"
 }
 
@@ -377,6 +457,7 @@ Python with requirements.txt:
   "install_commands": ["pip install -r requirements.txt"],
   "commands": ["python -m flake8 *.py", "python -m pytest", "python app.py"],
   "docker_image": "python:3.11-slim",
+  "working_dir": "",
   "reasoning": "Flask web app with requirements.txt - dependencies required"
 }
 
@@ -389,12 +470,21 @@ Node.js with package.json:
   "install_commands": ["npm install"],
   "commands": ["npm run lint", "npm test", "npm start"],
   "docker_image": "node:18-alpine",
+  "working_dir": "",
   "reasoning": "Express.js app with package.json - npm needed for dependencies"
 }`
 
 	// Формируем описание проекта
 	var projectDescription strings.Builder
 	projectDescription.WriteString(fmt.Sprintf("Project with %d files:\n\n", len(files)))
+
+	// Анализ структуры файлов для определения рабочей директории
+	projectDescription.WriteString("FILE STRUCTURE ANALYSIS:\n")
+	for filename := range files {
+		projectDescription.WriteString(fmt.Sprintf("- %s\n", filename))
+	}
+	projectDescription.WriteString("\nBased on file paths above, determine the correct working_dir.\n")
+	projectDescription.WriteString("Remember: working_dir should be the common parent directory of all files, or empty if files are at different levels.\n\n")
 
 	for filename, content := range files {
 		projectDescription.WriteString(fmt.Sprintf("=== File: %s ===\n", filename))
@@ -524,6 +614,24 @@ func (w *CodeValidationWorkflow) analyzeProjectWithRetry(ctx context.Context, fi
 
 	systemPrompt := `You are a code analysis agent with retry capability. Based on the previous validation errors, choose a DIFFERENT and SIMPLER approach.
 
+CRITICAL EXECUTION CONTEXT:
+- All files will be copied to /workspace directory in the Docker container
+- You need to determine the correct working_dir within /workspace where the project should run
+- If files are in a subdirectory (e.g. extracted from archive), specify working_dir (e.g. "project-name")
+- All commands (install_commands and validation commands) will be executed in /workspace/working_dir
+- Use relative paths or assume files are in the current working directory
+- DO NOT use absolute paths like /workspace/file.py - use just file.py
+
+WORKING DIRECTORY ANALYSIS:
+- Look at file paths to determine project structure
+- ONLY set working_dir if ALL files are in the SAME subdirectory
+- If files have different directory paths, keep working_dir empty and use relative paths
+- Examples:
+  * Files: "project/src/main.py", "project/build.gradle" → working_dir: "project"
+  * Files: "src/main.py", "build.gradle" → working_dir: "" (files are at different levels)
+  * Files: "main.py", "requirements.txt" → working_dir: "" (files are at root level)
+- BE CONSERVATIVE: when in doubt, use working_dir: ""
+
 RETRY STRATEGY:
 1. If Gradle failed → try kotlinc directly
 2. If Maven failed → try javac directly  
@@ -549,6 +657,7 @@ You MUST respond with valid JSON in this EXACT format. Do NOT include markdown c
   "install_commands": ["install command1", "install command2"],
   "commands": ["validation command1", "validation command2"],
   "docker_image": "appropriate docker base image",
+  "working_dir": "relative path within /workspace (empty for root, e.g. 'project-name' for subdirectory)",
   "reasoning": "explanation of why this simpler approach was chosen based on previous errors"
 }`
 
@@ -563,6 +672,15 @@ You MUST respond with valid JSON in this EXACT format. Do NOT include markdown c
 		}
 		projectDescription.WriteString("\nCHOOSE A SIMPLER APPROACH TO AVOID THESE ISSUES.\n\n")
 	}
+
+	// Анализ структуры файлов для определения рабочей директории
+	projectDescription.WriteString("FILE STRUCTURE ANALYSIS:\n")
+	for filename := range files {
+		projectDescription.WriteString(fmt.Sprintf("- %s\n", filename))
+	}
+	projectDescription.WriteString("\nBased on file paths above, determine the correct working_dir.\n")
+	projectDescription.WriteString("Remember: working_dir should be the common parent directory of all files, or empty if files are at different levels.\n")
+	projectDescription.WriteString("For retry attempts, prefer working_dir: \"\" for maximum simplicity.\n\n")
 
 	for filename, content := range files {
 		projectDescription.WriteString(fmt.Sprintf("=== File: %s ===\n", filename))
@@ -676,51 +794,98 @@ OUTPUT:
 func (w *CodeValidationWorkflow) answerUserQuestion(ctx context.Context, files map[string]string, userQuestion string, result *ValidationResult) (string, error) {
 	log.Printf("❓ Answering user question: %s", userQuestion)
 
-	systemPrompt := `You are a code explanation assistant. Answer the user's question about their code based on the validation results.
+	systemPrompt := `You are a code analysis and explanation assistant. Answer the user's question about their code/project based on the validation results and file contents.
 
 IMPORTANT:
-- Answer in the SAME LANGUAGE as the user's question
-- Be helpful and educational
-- Reference specific parts of the code when relevant
-- If validation failed, explain potential issues
-- If validation succeeded, explain how the code works
-- Be concise but informative
-- Use examples when helpful
+- Answer in the SAME LANGUAGE as the user's question (Russian for Russian questions, English for English questions)
+- Be helpful, educational, and comprehensive
+- Reference specific files, functions, and code structures when relevant
+- If validation failed, explain potential issues and how to fix them
+- If validation succeeded, explain how the code/project works
+- For project description requests, provide comprehensive overview including:
+  * Project purpose and main functionality
+  * Programming languages and frameworks used
+  * Architecture and file structure
+  * Key components and their responsibilities
+  * Dependencies and build system
+  * Potential improvements or observations
+- Use clear structure with headers and bullet points for project descriptions
+- Be detailed but readable
+- Use no more then 2000 symbols per answer
 
 Focus on:
 1. Direct answer to the user's question
-2. Code explanation if requested
-3. Problem diagnosis if issues exist
-4. Suggestions for improvement`
+2. Project/code analysis and explanation
+3. Technical stack identification
+4. Architecture overview and file structure analysis
+5. Problem diagnosis if issues exist
+6. Suggestions for improvement or development`
 
 	// Формируем контекст для ответа
 	var codeContext strings.Builder
-	codeContext.WriteString("USER'S CODE:\n\n")
+	codeContext.WriteString(fmt.Sprintf("PROJECT ANALYSIS REQUEST:\nUser wants to know: %s\n\n", userQuestion))
+
+	codeContext.WriteString(fmt.Sprintf("PROJECT STRUCTURE (%d files):\n", len(files)))
+
+	// Сначала показываем структуру файлов
+	for filename := range files {
+		codeContext.WriteString(fmt.Sprintf("- %s\n", filename))
+	}
+	codeContext.WriteString("\n")
+
+	codeContext.WriteString("FILE CONTENTS:\n\n")
 
 	for filename, content := range files {
 		codeContext.WriteString(fmt.Sprintf("=== %s ===\n", filename))
-		if len(content) > 1000 {
-			codeContext.WriteString(content[:1000])
-			codeContext.WriteString("\n... [truncated]\n\n")
+		if len(content) > 1500 {
+			codeContext.WriteString(content[:1500])
+			codeContext.WriteString("\n... [truncated for brevity]\n\n")
 		} else {
 			codeContext.WriteString(content)
 			codeContext.WriteString("\n\n")
 		}
 	}
 
-	codeContext.WriteString(fmt.Sprintf("VALIDATION RESULTS:\n"))
-	codeContext.WriteString(fmt.Sprintf("Success: %t\n", result.Success))
-	if len(result.Errors) > 0 {
-		codeContext.WriteString(fmt.Sprintf("Errors: %s\n", strings.Join(result.Errors, "; ")))
-	}
-	if len(result.Warnings) > 0 {
-		codeContext.WriteString(fmt.Sprintf("Warnings: %s\n", strings.Join(result.Warnings, "; ")))
-	}
-	if result.Output != "" && len(result.Output) < 500 {
-		codeContext.WriteString(fmt.Sprintf("Output: %s\n", result.Output))
+	codeContext.WriteString("VALIDATION RESULTS:\n")
+	codeContext.WriteString(fmt.Sprintf("- Overall Success: %t\n", result.Success))
+
+	if result.RetryAttempt > 1 {
+		codeContext.WriteString(fmt.Sprintf("- Completed after %d attempts\n", result.RetryAttempt))
 	}
 
-	codeContext.WriteString(fmt.Sprintf("\nUSER'S QUESTION: %s", userQuestion))
+	if len(result.BuildProblems) > 0 {
+		codeContext.WriteString("- Build Problems:\n")
+		for _, problem := range result.BuildProblems {
+			codeContext.WriteString(fmt.Sprintf("  * %s\n", problem))
+		}
+	}
+
+	if len(result.CodeProblems) > 0 {
+		codeContext.WriteString("- Code Problems:\n")
+		for _, problem := range result.CodeProblems {
+			codeContext.WriteString(fmt.Sprintf("  * %s\n", problem))
+		}
+	}
+
+	if len(result.Errors) > 0 && len(result.BuildProblems) == 0 && len(result.CodeProblems) == 0 {
+		codeContext.WriteString("- General Errors:\n")
+		for _, err := range result.Errors {
+			codeContext.WriteString(fmt.Sprintf("  * %s\n", err))
+		}
+	}
+
+	if len(result.Warnings) > 0 {
+		codeContext.WriteString("- Warnings:\n")
+		for _, warning := range result.Warnings {
+			codeContext.WriteString(fmt.Sprintf("  * %s\n", warning))
+		}
+	}
+
+	if result.Output != "" && len(result.Output) < 800 {
+		codeContext.WriteString(fmt.Sprintf("- Execution Output:\n%s\n", result.Output))
+	}
+
+	codeContext.WriteString(fmt.Sprintf("\nPlease provide a comprehensive answer to: %s", userQuestion))
 
 	messages := []llm.Message{
 		{Role: "system", Content: systemPrompt},

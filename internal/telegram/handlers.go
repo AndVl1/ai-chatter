@@ -678,10 +678,32 @@ func (b *Bot) handleDocumentValidation(ctx context.Context, msg *tgbotapi.Messag
 			return
 		}
 
-		// Обрабатываем запрос через Code Validation workflow с прогрессом
-		// При загрузке файла документа пользовательский вопрос пока не поддерживается
-		// TODO: в будущем можно извлекать вопрос из описания к файлу
-		result, err := b.codeValidationWorkflow.ProcessProjectValidationWithQuestion(ctx, files, "", progressTracker)
+		// Извлекаем пользовательский вопрос из описания к файлу
+		var userQuestion string
+		if msg.Caption != "" {
+			log.Printf("📝 Document caption found: %s", msg.Caption)
+			// Используем функцию DetectCodeInMessage для извлечения вопроса из описания
+			hasCode, _, _, extractedQuestion, err := codevalidation.DetectCodeInMessage(ctx, b.llmClient, msg.Caption)
+			if err != nil {
+				log.Printf("⚠️ Failed to extract question from caption: %v", err)
+			} else if extractedQuestion != "" {
+				userQuestion = extractedQuestion
+				log.Printf("❓ Extracted user question from document caption: %s", userQuestion)
+			} else if !hasCode {
+				// Если нет кода в описании, то вся caption может быть вопросом
+				userQuestion = msg.Caption
+				log.Printf("❓ Using entire caption as user question: %s", userQuestion)
+			}
+		}
+
+		// Если вопроса нет, генерируем краткое описание проекта
+		if userQuestion == "" {
+			userQuestion = "Опиши этот проект: его структуру, основные технологии, назначение и архитектуру"
+			log.Printf("📋 No user question found, using default project summary request")
+		}
+
+		// Обрабатываем запрос через Code Validation workflow с прогрессом и вопросом
+		result, err := b.codeValidationWorkflow.ProcessProjectValidationWithQuestion(ctx, files, userQuestion, progressTracker)
 		if err != nil {
 			log.Printf("❌ Document validation workflow failed: %v", err)
 			// Обновляем сообщение с ошибкой
@@ -832,6 +854,7 @@ func (b *Bot) processZipArchive(data []byte, filename string) (map[string]string
 			log.Printf("⚠️ Failed to read file %s in ZIP: %v", f.Name, err)
 			continue
 		}
+		log.Printf("ℹ️ Extracted file %s", f.Name)
 
 		files[f.Name] = string(content)
 		fileCount++

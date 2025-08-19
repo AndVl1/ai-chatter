@@ -114,7 +114,7 @@ func TestDetectCodeInMessage(t *testing.T) {
 				err:      nil,
 			}
 
-			hasCode, extractedCode, filename, err := DetectCodeInMessage(context.Background(), mockLLM, tt.messageContent)
+			hasCode, extractedCode, filename, _, err := DetectCodeInMessage(context.Background(), mockLLM, tt.messageContent)
 
 			if err != nil {
 				t.Errorf("DetectCodeInMessage() error = %v", err)
@@ -218,7 +218,7 @@ func TestCodeValidationWorkflow_ProcessCodeValidation(t *testing.T) {
 		t.Errorf("Expected exit code 0, got %d", result.ExitCode)
 	}
 
-	// Check that all progress steps were called
+	// Check that all progress steps were called (new order: copy_code before install_deps)
 	expectedSteps := []string{
 		"code_analysis:in_progress",
 		"code_analysis:completed",
@@ -226,6 +226,8 @@ func TestCodeValidationWorkflow_ProcessCodeValidation(t *testing.T) {
 		"docker_setup:completed",
 		"copy_code:in_progress",
 		"copy_code:completed",
+		"install_deps:in_progress",
+		"install_deps:completed",
 		"run_validation:in_progress",
 		"run_validation:completed",
 	}

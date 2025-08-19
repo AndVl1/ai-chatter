@@ -40,9 +40,9 @@ func NewCodeValidationProgressTracker(bot BotInterface, chatID int64, messageID 
 	steps := map[string]*ProgressStep{
 		"code_analysis":  {Name: "🔍 Анализ кода", Description: "Определение языка, фреймворка и зависимостей", Status: "pending"},
 		"docker_setup":   {Name: "🔧 Настройка окружения", Description: "Подготовка среды выполнения", Status: "pending"},
-		"install_deps":   {Name: "📦 Установка зависимостей", Description: "Анализ необходимых библиотек", Status: "pending"},
-		"copy_code":      {Name: "📋 Подготовка кода", Description: "Подготовка файлов для анализа", Status: "pending"},
-		"run_validation": {Name: "⚡ Анализ кода", Description: "Проверка структуры и качества кода", Status: "pending"},
+		"copy_code":      {Name: "📋 Копирование файлов", Description: "Загрузка кода в контейнер", Status: "pending"},
+		"install_deps":   {Name: "📦 Установка зависимостей", Description: "Установка необходимых библиотек", Status: "pending"},
+		"run_validation": {Name: "⚡ Валидация кода", Description: "Проверка структуры и качества кода", Status: "pending"},
 	}
 
 	return &CodeValidationProgressTracker{
@@ -113,8 +113,8 @@ func (pt *CodeValidationProgressTracker) buildProgressMessage() string {
 		message.WriteString(fmt.Sprintf("💻 **Язык:** %s\n\n", pt.language))
 	}
 
-	// Добавляем информацию о шагах
-	stepOrder := []string{"code_analysis", "docker_setup", "install_deps", "copy_code", "run_validation"}
+	// Добавляем информацию о шагах (в правильном порядке)
+	stepOrder := []string{"code_analysis", "docker_setup", "copy_code", "install_deps", "run_validation"}
 
 	for _, stepKey := range stepOrder {
 		if step, exists := pt.steps[stepKey]; exists {
@@ -187,7 +187,7 @@ func (pt *CodeValidationProgressTracker) buildFinalMessage(result *ValidationRes
 
 	// Показываем выполненные этапы
 	message.WriteString("📊 **Выполненные этапы:**\n")
-	stepOrder := []string{"code_analysis", "docker_setup", "install_deps", "copy_code", "run_validation"}
+	stepOrder := []string{"code_analysis", "docker_setup", "copy_code", "install_deps", "run_validation"}
 
 	for _, stepKey := range stepOrder {
 		if step, exists := pt.steps[stepKey]; exists {
