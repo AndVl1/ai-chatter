@@ -2,6 +2,7 @@ package codevalidation
 
 import (
 	"fmt"
+	"html"
 	"strings"
 	"sync"
 	"time"
@@ -108,9 +109,9 @@ func (pt *CodeValidationProgressTracker) buildProgressMessage() string {
 	var message strings.Builder
 
 	message.WriteString("🔄 **Валидация кода в процессе...**\n\n")
-	message.WriteString(fmt.Sprintf("📄 **Файл:** %s\n", pt.filename))
+	message.WriteString(fmt.Sprintf("📄 **Файл:** %s\n", html.EscapeString(pt.filename)))
 	if pt.language != "" {
-		message.WriteString(fmt.Sprintf("💻 **Язык:** %s\n\n", pt.language))
+		message.WriteString(fmt.Sprintf("💻 **Язык:** %s\n\n", html.EscapeString(pt.language)))
 	}
 
 	// Добавляем информацию о шагах (в правильном порядке)
@@ -157,15 +158,25 @@ func (pt *CodeValidationProgressTracker) buildProgressMessage() string {
 func (pt *CodeValidationProgressTracker) buildFinalMessage(result *ValidationResult) string {
 	var message strings.Builder
 
+	// Формируем заголовок с информацией о токенах
+	var statusEmoji, statusText string
 	if result.Success {
-		message.WriteString("✅ **Валидация кода успешно завершена!**\n\n")
+		statusEmoji = "✅"
+		statusText = "успешно завершена"
 	} else {
-		message.WriteString("❌ **Валидация кода завершена с ошибками**\n\n")
+		statusEmoji = "❌"
+		statusText = "завершена с ошибками"
 	}
 
-	message.WriteString(fmt.Sprintf("📄 **Файл:** %s\n", pt.filename))
+	if result.TotalTokens > 0 {
+		message.WriteString(fmt.Sprintf("%s **Валидация кода %s** | 🧠 %d токенов\n\n", statusEmoji, statusText, result.TotalTokens))
+	} else {
+		message.WriteString(fmt.Sprintf("%s **Валидация кода %s**\n\n", statusEmoji, statusText))
+	}
+
+	message.WriteString(fmt.Sprintf("📄 **Файл:** %s\n", html.EscapeString(pt.filename)))
 	if pt.language != "" {
-		message.WriteString(fmt.Sprintf("💻 **Язык:** %s\n", pt.language))
+		message.WriteString(fmt.Sprintf("💻 **Язык:** %s\n", html.EscapeString(pt.language)))
 	}
 	message.WriteString(fmt.Sprintf("⏱️ **Время выполнения:** %s\n", result.Duration))
 	message.WriteString(fmt.Sprintf("🔢 **Exit Code:** %d", result.ExitCode))
@@ -179,9 +190,9 @@ func (pt *CodeValidationProgressTracker) buildFinalMessage(result *ValidationRes
 	// Показываем ответ на вопрос пользователя если есть
 	if result.UserQuestion != "" && result.QuestionAnswer != "" {
 		message.WriteString("❓ **Ваш вопрос:** ")
-		message.WriteString(result.UserQuestion)
+		message.WriteString(html.EscapeString(result.UserQuestion))
 		message.WriteString("\n\n💬 **Ответ:**\n")
-		message.WriteString(result.QuestionAnswer)
+		message.WriteString(html.EscapeString(result.QuestionAnswer))
 		message.WriteString("\n\n")
 	}
 
@@ -209,7 +220,7 @@ func (pt *CodeValidationProgressTracker) buildFinalMessage(result *ValidationRes
 
 	// Показываем анализ ошибок если есть
 	if result.ErrorAnalysis != "" {
-		message.WriteString(fmt.Sprintf("\n🔍 **Анализ ошибок:** %s\n", result.ErrorAnalysis))
+		message.WriteString(fmt.Sprintf("\n🔍 **Анализ ошибок:** %s\n", html.EscapeString(result.ErrorAnalysis)))
 	}
 
 	// Показываем результаты
@@ -220,14 +231,14 @@ func (pt *CodeValidationProgressTracker) buildFinalMessage(result *ValidationRes
 		if len(result.BuildProblems) > 0 {
 			message.WriteString("\n🔧 **Проблемы сборки:**\n")
 			for _, problem := range result.BuildProblems {
-				message.WriteString(fmt.Sprintf("• %s\n", problem))
+				message.WriteString(fmt.Sprintf("• %s\n", html.EscapeString(problem)))
 			}
 		}
 
 		if len(result.CodeProblems) > 0 {
 			message.WriteString("\n💻 **Проблемы в коде:**\n")
 			for _, problem := range result.CodeProblems {
-				message.WriteString(fmt.Sprintf("• %s\n", problem))
+				message.WriteString(fmt.Sprintf("• %s\n", html.EscapeString(problem)))
 			}
 		}
 
@@ -235,7 +246,7 @@ func (pt *CodeValidationProgressTracker) buildFinalMessage(result *ValidationRes
 		if len(result.BuildProblems) == 0 && len(result.CodeProblems) == 0 && len(result.Errors) > 0 {
 			message.WriteString("\n❌ **Обнаружены проблемы:**\n")
 			for _, err := range result.Errors {
-				message.WriteString(fmt.Sprintf("• %s\n", err))
+				message.WriteString(fmt.Sprintf("• %s\n", html.EscapeString(err)))
 			}
 		}
 	}
@@ -244,7 +255,7 @@ func (pt *CodeValidationProgressTracker) buildFinalMessage(result *ValidationRes
 	if len(result.Warnings) > 0 {
 		message.WriteString("\n⚠️ **Предупреждения:**\n")
 		for _, warning := range result.Warnings {
-			message.WriteString(fmt.Sprintf("• %s\n", warning))
+			message.WriteString(fmt.Sprintf("• %s\n", html.EscapeString(warning)))
 		}
 	}
 
@@ -252,11 +263,11 @@ func (pt *CodeValidationProgressTracker) buildFinalMessage(result *ValidationRes
 	if len(result.Suggestions) > 0 {
 		message.WriteString("\n💡 **Рекомендации:**\n")
 		for _, suggestion := range result.Suggestions {
-			message.WriteString(fmt.Sprintf("• %s\n", suggestion))
+			message.WriteString(fmt.Sprintf("• %s\n", html.EscapeString(suggestion)))
 		}
 	}
 
-	// Показываем output если он не слишком длинный
+	// Показываем output если он не слишком длинный (в блоке кода HTML экранирование не нужно)
 	if len(result.Output) > 0 && len(result.Output) < 1000 {
 		message.WriteString(fmt.Sprintf("\n📋 **Детали выполнения:**\n```\n%s\n```", result.Output))
 	}

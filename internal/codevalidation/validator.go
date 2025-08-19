@@ -58,6 +58,7 @@ type ValidationResult struct {
 	RetryAttempt   int      `json:"retry_attempt,omitempty"`   // Номер попытки (для retry логики)
 	BuildProblems  []string `json:"build_problems,omitempty"`  // Проблемы со сборкой
 	CodeProblems   []string `json:"code_problems,omitempty"`   // Проблемы в коде
+	TotalTokens    int      `json:"total_tokens,omitempty"`    // Общее количество токенов за всю валидацию
 }
 
 // ProcessCodeValidation обрабатывает валидацию кода с progress tracking
@@ -79,6 +80,7 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 
 	const maxRetries = 3
 	var lastResult *ValidationResult
+	var totalTokens int // Накапливаем токены от всех LLM запросов
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		log.Printf("🔄 Validation attempt %d/%d", attempt, maxRetries)
@@ -98,6 +100,9 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 			// Повторные попытки - анализ с учетом предыдущих ошибок
 			analysis, err = w.analyzeProjectWithRetry(ctx, files, lastResult, attempt)
 		}
+
+		// Накапливаем токены от анализа проекта (примерная оценка)
+		totalTokens += w.estimateAnalysisTokens(files)
 
 		if err != nil {
 			if progressCallback != nil {
@@ -130,8 +135,12 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 					log.Printf("⚠️ Failed to answer user question: %v", err)
 				} else {
 					result.QuestionAnswer = answer
+					// Накапливаем токены от ответа на вопрос пользователя
+					totalTokens += w.estimateQuestionAnswerTokens(files, userQuestion, answer)
 				}
 			}
+			// Устанавливаем общее количество токенов
+			result.TotalTokens = totalTokens
 			log.Printf("✅ Code validation completed successfully on attempt %d", attempt)
 			return result, nil
 		}
@@ -141,6 +150,9 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 		result.ErrorAnalysis = errorAnalysis
 		result.BuildProblems = buildProblems
 		result.CodeProblems = codeProblems
+
+		// Накапливаем токены от анализа ошибок
+		totalTokens += w.estimateErrorAnalysisTokens(result, analysis)
 
 		log.Printf("📊 Error analysis: %s", errorAnalysis)
 		log.Printf("🔧 Build problems: %v", buildProblems)
@@ -156,8 +168,12 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 					log.Printf("⚠️ Failed to answer user question: %v", err)
 				} else {
 					result.QuestionAnswer = answer
+					// Накапливаем токены от ответа на вопрос пользователя
+					totalTokens += w.estimateQuestionAnswerTokens(files, userQuestion, answer)
 				}
 			}
+			// Устанавливаем общее количество токенов
+			result.TotalTokens = totalTokens
 			return result, nil
 		}
 
@@ -171,8 +187,12 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 					log.Printf("⚠️ Failed to answer user question: %v", err)
 				} else {
 					result.QuestionAnswer = answer
+					// Накапливаем токены от ответа на вопрос пользователя
+					totalTokens += w.estimateQuestionAnswerTokens(files, userQuestion, answer)
 				}
 			}
+			// Устанавливаем общее количество токенов
+			result.TotalTokens = totalTokens
 			return result, nil
 		}
 
@@ -910,4 +930,65 @@ func parseJSONResponse(content string, target interface{}) error {
 
 	// Добавляем недостающий import
 	return json.Unmarshal([]byte(content), target)
+}
+
+// estimateAnalysisTokens оценивает количество токенов для анализа проекта
+func (w *CodeValidationWorkflow) estimateAnalysisTokens(files map[string]string) int {
+	// Примерная оценка: системный промпт (~1500 токенов) + содержимое файлов (~4 символа на токен) + ответ (~300 токенов)
+	systemPromptTokens := 1500
+
+	var contentSize int
+	for _, content := range files {
+		if len(content) > 2000 {
+			contentSize += 2000 // Обрезаем длинные файлы
+		} else {
+			contentSize += len(content)
+		}
+	}
+	contentTokens := contentSize / 4 // Примерно 4 символа на токен
+
+	responseTokens := 300 // Примерная длина JSON ответа
+
+	return systemPromptTokens + contentTokens + responseTokens
+}
+
+// estimateQuestionAnswerTokens оценивает количество токенов для ответа на вопрос пользователя
+func (w *CodeValidationWorkflow) estimateQuestionAnswerTokens(files map[string]string, question, answer string) int {
+	// Системный промпт (~800 токенов) + структура файлов + содержимое + вопрос + ответ
+	systemPromptTokens := 800
+
+	var contentSize int
+	for filename, content := range files {
+		contentSize += len(filename) + 10 // Название файла + разметка
+		if len(content) > 1500 {
+			contentSize += 1500 // Обрезаем длинные файлы
+		} else {
+			contentSize += len(content)
+		}
+	}
+
+	contentTokens := contentSize / 4
+	questionTokens := len(question) / 4
+	answerTokens := len(answer) / 4
+
+	return systemPromptTokens + contentTokens + questionTokens + answerTokens
+}
+
+// estimateErrorAnalysisTokens оценивает количество токенов для анализа ошибок
+func (w *CodeValidationWorkflow) estimateErrorAnalysisTokens(result *ValidationResult, analysis *CodeAnalysisResult) int {
+	// Системный промпт (~750 токенов) + информация об ошибках + ответ
+	systemPromptTokens := 750
+
+	var errorContentSize int
+	for _, err := range result.Errors {
+		errorContentSize += len(err)
+	}
+	if result.Output != "" {
+		errorContentSize += len(result.Output)
+	}
+
+	contentTokens := errorContentSize / 4
+	responseTokens := 200 // Примерная длина JSON ответа
+
+	return systemPromptTokens + contentTokens + responseTokens
 }

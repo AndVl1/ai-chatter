@@ -186,7 +186,7 @@ func TestProgressTracker_SetFinalResult(t *testing.T) {
 	lastMessage := mockBot.sentMessages[len(mockBot.sentMessages)-1]
 	messageText := lastMessage.Text
 
-	if !strings.Contains(messageText, "✅ **Валидация кода успешно завершена!**") {
+	if !strings.Contains(messageText, "✅ **Валидация кода успешно завершена**") {
 		t.Error("Expected success message in final result")
 	}
 
@@ -222,7 +222,7 @@ func TestProgressTracker_BuildFinalMessage_Success(t *testing.T) {
 	message := tracker.buildFinalMessage(result)
 
 	// Check success indicators
-	if !strings.Contains(message, "✅ **Валидация кода успешно завершена!**") {
+	if !strings.Contains(message, "✅ **Валидация кода успешно завершена**") {
 		t.Error("Expected success header")
 	}
 
@@ -300,7 +300,7 @@ func TestProgressTracker_BuildFinalMessage_Failure(t *testing.T) {
 		t.Error("Expected first error message")
 	}
 
-	if !strings.Contains(message, "Undefined variable 'x'") {
+	if !strings.Contains(message, "Undefined variable &#39;x&#39;") {
 		t.Error("Expected second error message")
 	}
 
@@ -309,7 +309,7 @@ func TestProgressTracker_BuildFinalMessage_Failure(t *testing.T) {
 		t.Error("Expected warnings section")
 	}
 
-	if !strings.Contains(message, "Unused import 'os'") {
+	if !strings.Contains(message, "Unused import &#39;os&#39;") {
 		t.Error("Expected warning message")
 	}
 

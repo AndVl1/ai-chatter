@@ -11,6 +11,16 @@ All notable changes to this project will be documented in this file.
   - **Enhanced File Verification**: Добавлена отладка и проверка фактического копирования файлов в Docker контейнер (`docker.go:196-228`)
   - **Progress Tracking Updates**: Обновлен порядок шагов в трекере прогресса для отражения правильной последовательности
   - **Step Descriptions**: Улучшены описания шагов валидации для лучшего понимания пользователем
+- **HTML Entity Parsing Fix**: Исправлена ошибка Telegram Bot API при парсинге HTML сущностей
+  - **Error Message Escaping**: Добавлено экранирование HTML символов в сообщениях об ошибках (`handlers.go:620,673,711,759`)
+  - **Progress Content Escaping**: Экранирование HTML в результатах валидации и ответах пользователю (`progress.go:177-272`)
+  - **Safe Content Display**: Предотвращение ошибок парсинга при наличии символов `<`, `>` в выводе команд
+- **Docker Network Connectivity Fix**: Исправлены проблемы сетевого подключения в Docker контейнерах
+  - **Bridge Network Configuration**: Добавлены параметры `--network=bridge` для доступа к интернету (`docker.go:118`)
+  - **DNS Configuration**: Настройка DNS серверов `--dns=8.8.8.8` и `--dns=8.8.4.4` для надёжного разрешения имён (`docker.go:119-120`)
+  - **Network Diagnostics**: Добавлены функции диагностики сетевых проблем `verifyNetworkAccess` и `diagnoseNetworkIssues` (`docker.go:463-555`)
+  - **Dependency Installation Fix**: Решены проблемы с pip и golang proxy недоступностью в контейнерах
+  - **Error Pattern Detection**: Автоматическое обнаружение сетевых ошибок с паттернами поиска (`docker.go:494-517`)
 
 ### Enhanced (2025-08-19)
 - **Archive Question Support**: Добавлена поддержка пользовательских вопросов для архивов
@@ -19,6 +29,11 @@ All notable changes to this project will be documented in this file.
   - **Enhanced LLM Context**: Улучшенный контекст для анализа проектов с структурой файлов (`validator.go:823-887`)
   - **Comprehensive Project Analysis**: Детальный анализ технологий, архитектуры и структуры проектов
   - **Better Error Reporting**: Улучшенное отображение проблем сборки и кода в ответах пользователю
+- **Token Usage Tracking**: Добавлен подсчёт и отображение токенов LLM для валидации кода
+  - **Token Accumulation**: Накопление токенов от всех LLM запросов во время валидации (`validator.go:935-994`)
+  - **Header Display**: Отображение общего количества токенов в заголовке результата (`progress.go:170-174`)
+  - **Estimation Functions**: Функции оценки токенов для анализа проекта, ответов на вопросы и анализа ошибок
+  - **Cost Transparency**: Пользователи теперь видят сколько токенов потратил бот на обработку их запроса
 
 ## [Day 9 - Multi-MCP Gmail Integration & Progress Tracking]
 

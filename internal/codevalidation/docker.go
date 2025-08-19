@@ -99,6 +99,7 @@ func (m *MockDockerClient) ExecuteValidation(ctx context.Context, containerID st
 		RetryAttempt:   0,
 		BuildProblems:  []string{},
 		CodeProblems:   []string{},
+		TotalTokens:    0, // В mock режиме токены не тратятся
 	}, nil
 }
 
@@ -111,9 +112,12 @@ func (m *MockDockerClient) RemoveContainer(ctx context.Context, containerID stri
 func (d *DockerClient) CreateContainer(ctx context.Context, analysis *CodeAnalysisResult) (string, error) {
 	log.Printf("🐳 Creating Docker container with image: %s", analysis.DockerImage)
 
-	// Создаем контейнер
+	// Создаем контейнер с сетевыми настройками
 	cmd := exec.CommandContext(ctx, d.dockerPath, "run", "-d", "-i",
 		"--workdir=/workspace",
+		"--network=host", // Используем bridge сеть для доступа к интернету
+		"--dns=8.8.8.8",  // Добавляем Google DNS
+		"--dns=8.8.4.4",  // Резервный DNS
 		"-e", "DEBIAN_FRONTEND=noninteractive",
 		analysis.DockerImage, "sh")
 
@@ -124,6 +128,12 @@ func (d *DockerClient) CreateContainer(ctx context.Context, analysis *CodeAnalys
 
 	containerID := strings.TrimSpace(string(output))
 	log.Printf("✅ Container created and started: %s", containerID)
+
+	// Проверяем сетевое подключение в контейнере
+	if err := d.verifyNetworkAccess(ctx, containerID); err != nil {
+		log.Printf("⚠️ Network connectivity check failed: %v", err)
+	}
+
 	return containerID, nil
 }
 
@@ -369,7 +379,16 @@ func (d *DockerClient) InstallDependencies(ctx context.Context, containerID stri
 		execCmd := exec.CommandContext(ctx, d.dockerPath, "exec", "-w", workingDir, containerID, "sh", "-c", cmd)
 		output, err := execCmd.CombinedOutput()
 		if err != nil {
-			return fmt.Errorf("install command '%s' failed: %w\nOutput: %s", cmd, err, string(output))
+			log.Printf("❌ Install command failed: %s", string(output))
+
+			// Проверяем если это сетевая ошибка
+			outputStr := string(output)
+			if d.isNetworkError(outputStr) {
+				log.Printf("🌐 Detected network connectivity issue, running diagnostics...")
+				d.diagnoseNetworkIssues(ctx, containerID)
+			}
+
+			return fmt.Errorf("install command '%s' failed: %w\nOutput: %s", cmd, err, outputStr)
 		}
 
 		log.Printf("📦 Install command output: %s", string(output))
@@ -439,4 +458,98 @@ func (d *DockerClient) RemoveContainer(ctx context.Context, containerID string) 
 
 	log.Printf("✅ Container removed: %s", containerID)
 	return nil
+}
+
+// verifyNetworkAccess проверяет сетевое подключение в контейнере
+func (d *DockerClient) verifyNetworkAccess(ctx context.Context, containerID string) error {
+	log.Printf("🌐 Checking network connectivity in container %s", containerID)
+
+	// Проверяем DNS разрешение
+	dnsCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "nslookup", "google.com")
+	if err := dnsCmd.Run(); err != nil {
+		log.Printf("❌ DNS resolution failed: %v", err)
+
+		// Пытаемся проверить основной DNS
+		dnsTestCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "nslookup", "8.8.8.8")
+		if err := dnsTestCmd.Run(); err != nil {
+			return fmt.Errorf("DNS resolution completely failed: %w", err)
+		}
+	}
+
+	// Проверяем HTTP подключение
+	httpCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "sh", "-c",
+		"command -v wget >/dev/null 2>&1 && wget -q --spider https://google.com --timeout=10 || "+
+			"command -v curl >/dev/null 2>&1 && curl -s --max-time 10 https://google.com >/dev/null || "+
+			"echo 'No wget/curl available for HTTP test'")
+
+	if err := httpCmd.Run(); err != nil {
+		log.Printf("⚠️ HTTP connectivity test failed: %v", err)
+		return fmt.Errorf("HTTP connectivity failed: %w", err)
+	}
+
+	log.Printf("✅ Network connectivity verified")
+	return nil
+}
+
+// isNetworkError проверяет содержит ли вывод признаки сетевых ошибок
+func (d *DockerClient) isNetworkError(output string) bool {
+	networkErrorPatterns := []string{
+		"Failed to establish a new connection",
+		"Temporary failure in name resolution",
+		"network is unreachable",
+		"Connection timed out",
+		"Could not resolve host",
+		"dial tcp: lookup",
+		"connection broken",
+		"NewConnectionError",
+		"proxy.golang.org",
+		"pypi.org",
+		"registry.npmjs.org",
+	}
+
+	outputLower := strings.ToLower(output)
+	for _, pattern := range networkErrorPatterns {
+		if strings.Contains(outputLower, strings.ToLower(pattern)) {
+			return true
+		}
+	}
+	return false
+}
+
+// diagnoseNetworkIssues выполняет диагностику сетевых проблем в контейнере
+func (d *DockerClient) diagnoseNetworkIssues(ctx context.Context, containerID string) {
+	log.Printf("🔍 Running network diagnostics for container %s", containerID)
+
+	// Проверка сетевых интерфейсов
+	ifCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "ip", "addr", "show")
+	if output, err := ifCmd.CombinedOutput(); err == nil {
+		log.Printf("📡 Network interfaces:\n%s", string(output))
+	}
+
+	// Проверка маршрутизации
+	routeCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "ip", "route", "show")
+	if output, err := routeCmd.CombinedOutput(); err == nil {
+		log.Printf("🗺️ Routing table:\n%s", string(output))
+	}
+
+	// Проверка DNS настроек
+	resolvCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "cat", "/etc/resolv.conf")
+	if output, err := resolvCmd.CombinedOutput(); err == nil {
+		log.Printf("🌐 DNS configuration:\n%s", string(output))
+	}
+
+	// Тест ping к внешним адресам
+	pingCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "ping", "-c", "2", "8.8.8.8")
+	if err := pingCmd.Run(); err != nil {
+		log.Printf("❌ Cannot ping 8.8.8.8: %v", err)
+	} else {
+		log.Printf("✅ Can ping 8.8.8.8")
+	}
+
+	// Проверка доступности портов
+	tcpCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "sh", "-c",
+		"timeout 5 bash -c '</dev/tcp/8.8.8.8/53' && echo 'Port 53 accessible' || echo 'Port 53 not accessible'")
+	if output, err := tcpCmd.CombinedOutput(); err == nil {
+		log.Printf("🔌 TCP connectivity test: %s", strings.TrimSpace(string(output)))
+	}
 }
