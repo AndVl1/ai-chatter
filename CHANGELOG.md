@@ -2,7 +2,156 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Day 9 - Multi-MCP Gmail Integration & Progress Tracking]
+## [Day 9 - Multi-MCP Gmail Integration, Progress Tracking & VibeCoding Mode Enhanced]
+
+### Fixed (2025-08-20) - VibeCoding Docker Container & Environment Setup
+- **Fixed Docker Container Creation**: Исправлена критическая ошибка создания Docker контейнеров (exit status 125) (`docker.go:115-125`)
+  - **Port Mapping Syntax**: Исправлен некорректный синтаксис портов с `-p 80:80/tcp` на `-p 8080:8080`
+  - **Network Configuration**: Изменена сеть с `--network=host` на `--network=bridge` для корректной работы
+  - **Enhanced Error Handling**: Добавлен вывод stderr и логирование команд Docker для диагностики
+  - **Command Logging**: Полное логирование Docker команд для отладки проблем создания контейнеров
+- **Updated LLM Examples**: Добавлены актуальные примеры Go в промпт LLM (`validator.go:468-529`)
+  - **Go Script Example**: Пример простого Go скрипта с `golang:1.22-alpine` вместо несуществующих версий
+  - **Go Module Example**: Пример Go проекта с модулями и правильными командами тестирования
+  - **Consistent Versioning**: Использование актуальных версий Docker образов для предотвращения ошибок
+- **Fixed generateTestCommand**: Исправлена последняя захардкоженная функция генерации команд тестирования (`session.go:241-266`)
+  - **TestCommands Priority**: Приоритетное использование поля `TestCommands` из LLM анализа вместо захардкоженных паттернов
+  - **Removed Language Switch**: Удалены захардкоженные switch-case по языкам (Python, JavaScript, Go, Java, Rust)
+  - **Smart Fallback Logic**: Интеллектуальная fallback логика с использованием validation commands как тестовых
+  - **Comprehensive Logging**: Детальное логирование выбора команд для отладки проблем
+
+### Enhanced (2025-08-20) - Complete VibeCoding Mode LLM Unification
+- **VibeCoding Mode Full LLM Integration**: Полная замена всех захардкоженных паттернов на LLM-based подходы для максимальной гибкости
+  - **Dynamic Test File Detection**: Замена захардкоженной функции `isTestFile` на LLM-анализ (`commands.go:1544-1605`)
+    - **Context-Aware Analysis**: LLM учитывает язык программирования и проект при определении тестовых файлов
+    - **Intelligent Pattern Recognition**: Автоматическое распознавание конвенций именования тестов для любого языка
+    - **Confidence Scoring**: LLM возвращает уровень уверенности в определении типа файла
+    - **Fallback Logic**: Безопасный fallback на базовое определение при ошибках LLM
+  - **Smart Test Command Management**: LLM-based адаптация и проверка команд тестирования (`commands.go:956-1082`)
+    - **Command Suitability Analysis**: LLM определяет совместимость команды с конкретным тестовым файлом
+    - **Intelligent Command Adaptation**: Автоматическая адаптация команд для специфичных файлов через LLM
+    - **Framework-Aware Processing**: Учет особенностей различных testing frameworks через LLM
+    - **Language-Specific Logic**: Замена захардкоженных switch-case на универсальный LLM подход
+  - **Removed Hardcoded Test Generation**: Удаление всех языкоспецифичных функций генерации тестов
+    - **Eliminated generateTestsBasic**: Удалена захардкоженная генерация базовых тестов по языкам (`commands.go:712-729`)
+    - **Removed Language-Specific Generators**: Удалены функции `generatePythonTests`, `generateJavaScriptTests`, `generateGoTests`
+    - **Pure LLM Approach**: Всю генерацию тестов теперь выполняет LLM через JSON протокол без fallback
+    - **Error Handling**: При неудаче генерации возвращается ошибка вместо заглушек
+  - **Architecture Improvements**: Унификация всей логики через LLM запросы
+    - **Context Propagation**: Добавление контекста и языка проекта во все LLM-функции
+    - **JSON Response Parsing**: Стандартизованное извлечение JSON из markdown блоков LLM ответов
+    - **Comprehensive Logging**: Детальное логирование всех LLM решений с reasoning
+    - **Performance Optimization**: Кэширование LLM ответов для избежания повторных запросов
+
+### Enhanced (2025-08-20) - Automatic Test Fixing & Web Interface Improvements
+- **VibeCoding Mode Automatic Test Fixing**: Реализация автоматического исправления проваливающихся тестов через LLM
+  - **Smart Test Retry Logic**: Автоматические попытки исправления при неуспешных тестах (до 3 попыток) (`commands.go:232-331`)
+    - **Test Failure Analysis**: LLM анализирует вывод проваливающихся тестов и предлагает исправления
+    - **Test Content Updates**: Автоматическое обновление тестовых файлов на основе анализа LLM (`commands.go:1390-1470`)
+    - **Execution Issue Fixes**: Исправление проблем выполнения тестов (отсутствующие зависимости, конфигурация) (`commands.go:1472-1541`)
+    - **Progressive Feedback**: Обновление сообщений с прогрессом попыток исправления
+  - **Advanced Test Classification**: Интеллектуальное определение тестовых файлов по паттернам (`commands.go:1543-1563`)
+    - **Multi-Language Support**: Поддержка паттернов тестов для Python, JavaScript/TypeScript, Go, Java
+    - **Directory Detection**: Распознавание тестовых директорий (/test/, /tests/)
+    - **File Pattern Matching**: Определение по префиксам (test_) и суффиксам (_test.py, .spec.js)
+  - **Error-Specific Handling**: Различная логика для ошибок выполнения и провалившихся тестов
+    - **Execution Errors**: Установка недостающих зависимостей через LLM рекомендации
+    - **Test Logic Errors**: Исправление логики тестов, импортов, assertions через LLM
+
+- **VibeCoding Web Interface Accessibility Fix**: Исправление проблем с доступностью HTML страницы структуры проекта
+  - **Improved URL Routing**: Исправлена маршрутизация URL для корректной обработки запросов (`webserver.go:61-65`)
+    - **Pattern Order**: Правильный порядок регистрации обработчиков (статические файлы → API → страницы → корень)
+    - **Root Handler**: Добавлен корневой обработчик для отладки и перенаправления (`webserver.go:719-744`)
+    - **Better Error Handling**: Улучшенная обработка ошибок с подробными сообщениями
+  - **Enhanced URL Processing**: Улучшенная обработка URL для VibeCoding сессий (`webserver.go:91-128`)
+    - **Detailed Logging**: Подробное логирование запросов для отладки проблем доступности
+    - **Validation Logic**: Улучшенная валидация пути с информативными сообщениями об ошибках
+    - **Session Discovery**: Более понятные сообщения при отсутствии сессий
+  - **Server Configuration**: Оптимизация конфигурации веб-сервера (`webserver.go:66-75`)
+    - **Localhost Binding**: Изменение привязки с 0.0.0.0 на localhost для локального доступа
+    - **Timeout Settings**: Добавление таймаутов чтения, записи и idle для стабильности
+    - **URL Updates**: Обновление URL в сообщениях на http://localhost:8080
+
+### Enhanced (2025-08-20) - Test Validation Refactoring
+- **VibeCoding Mode Test System Refactoring**: Унификация системы валидации тестов для использования LLM-подхода вместо захардкоженных команд
+  - **LLM-Based Test Commands**: Добавлено поле `TestCommands` в `CodeAnalysisResult` для получения команд тестирования от LLM (`validator.go:28`)
+    - **Unified Analysis**: Обновлен JSON schema для включения `test_commands` в ответ LLM анализа проекта
+    - **Project-Specific Commands**: LLM генерирует специфичные для проекта команды тестирования вместо универсальных
+    - **Multi-Language Support**: Поддержка команд тестирования для различных языков и фреймворков через LLM
+  - **Test Validation Improvements**: Полная модернизация процесса валидации тестов (`commands.go:957-1061`)
+    - **Dynamic Command Selection**: Использование команд тестирования из LLM анализа вместо захардкоженных (`commands.go:958-983`)
+    - **Smart Command Adaptation**: Автоматическая адаптация команд тестирования для конкретных файлов (`commands.go:1039-1061`)
+    - **File-Specific Validation**: Логика проверки соответствия команды типу тестируемого файла (`commands.go:1016-1037`)
+    - **Removed validateTestSyntax**: Удален метод `validateTestSyntax` - синтаксические ошибки обнаруживаются при выполнении тестов
+  - **Unified Architecture**: Переход к единому LLM-подходу вместо множественных захардкоженных методов
+    - **Removed Hardcoded Logic**: Удалены методы `detectLanguageFromFile`, `getDockerImageForLanguage` из VibeCoding
+    - **CodeAnalysisResult Integration**: Замена `projectanalysis.ProjectInfo` на унифицированный `codevalidation.CodeAnalysisResult`
+    - **AnalyzeProjectForVibeCoding**: Новый метод в workflow для анализа проекта специально для VibeCoding режима
+  - **Test Infrastructure**: Обновление тестов для работы с новой архитектурой
+    - **Updated Test Signatures**: Исправлены сигнатуры методов `CreateSession` в тестах для включения LLM клиента
+    - **Removed Obsolete Tests**: Удалены тесты для устаревших методов детекции языка
+    - **Validation Flow Tests**: Обновлены тесты валидации для использования LLM команд
+
+### Enhanced (2025-08-20)
+- **VibeCoding Mode MCP Integration**: Интеграция MCP (Model Context Protocol) сервера для автономной работы LLM
+  - **MCP Server**: Полнофункциональный MCP сервер с 8 инструментами для прямого доступа LLM к файлам проекта (`mcp_server.go`)
+    - **File Operations**: vibe_list_files, vibe_read_file, vibe_write_file, vibe_delete_file для управления файлами
+    - **Command Execution**: vibe_execute_command для выполнения команд в контейнере Docker
+    - **Code Validation**: vibe_validate_code и vibe_run_tests для проверки и тестирования кода  
+    - **Session Info**: vibe_get_session_info для получения информации о сессии
+  - **Autonomous Work Mode**: Новый режим `/vibecoding_auto` для автономной работы LLM с проектом без участия пользователя
+    - **Multi-step Processing**: До 10 шагов автономной работы с логированием каждого шага (`llm_protocol.go:416-506`)
+    - **Tool Integration**: Прямое использование MCP инструментов LLM для чтения, записи файлов, выполнения команд
+    - **Error Handling**: Обработка ошибок выполнения инструментов с подробным логированием
+    - **State Management**: Отслеживание состояния ожидания задачи для автономной работы (`commands.go:33,185-188`)
+  - **Enhanced LLM Protocol**: Расширение JSON протокола для поддержки MCP инструментов
+    - **Autonomous Action**: Новый action "autonomous_work" для запуска автономного режима
+    - **MCP Response Format**: Структурированный формат ответа с планом выполнения, вызовами инструментов и результатами
+    - **Step-by-Step Execution**: Пошаговое выполнение с возможностью продолжения или завершения работы
+
+- **VibeCoding Mode Additional Improvements**: Дополнительные улучшения на основе обратной связи пользователя
+  - **Test Validation Error Handling**: Исправлено зависающее сообщение при ошибке выполнения тестов
+    - **Enhanced Logging**: Добавлено подробное логирование результатов выполнения тестов (`commands.go:218-231`)
+    - **Proper Error Display**: Обновление сообщения с результатами даже при неуспешных тестах
+    - **Status Return**: Возврат ошибки при неуспешной валидации для правильного отображения статуса
+  - **Web Interface for File Structure**: HTTP сервер с интерактивной страницей структуры файлов
+    - **File Tree Viewer**: Древовидное отображение файлов проекта с возможностью раскрытия папок (`webserver.go`)
+    - **File Content Display**: Просмотр содержимого файлов по клику с подсветкой сгенерированных файлов
+    - **Real-time Updates**: Автообновление страницы каждые 30 секунд для отображения изменений
+    - **Responsive Design**: Адаптивный интерфейс с темной темой в стиле IDE (`webserver.go:291-399`)
+    - **Session Statistics**: Отображение статистики сессии (количество файлов, размер, длительность)
+  - **Advanced Error Analysis Protocol**: Значительное улучшение анализа ошибок настройки окружения
+    - **Go Version Detection**: Автоматическое извлечение требований к версии Go из go.mod файлов (`session.go:631-655`)
+    - **Specific Docker Images**: Предложение конкретных Docker образов (golang:1.22, python:3.11-slim) вместо общих рекомендаций
+    - **Pre-install Commands**: Поддержка команд, выполняемых перед основной установкой (`session.go:473-480`)
+    - **Structured Error Types**: Категоризация ошибок по типам (go_version_mismatch, missing_dependency, wrong_docker_image)
+    - **Enhanced Context**: Передача содержимого конфигурационных файлов (go.mod, package.json, requirements.txt) для точного анализа
+    - **Retry Logic**: Интеллектуальная логика повтора попыток на основе анализа LLM (`session.go:547-551`)
+
+- **VibeCoding Mode Comprehensive Improvements**: Полное улучшение архитектуры VibeCoding в соответствии с требованиями пользователя
+  - **Error Analysis & Auto-Fix**: Добавлен интеллектуальный анализ ошибок настройки окружения с автоматическими попытками исправления (до 3 попыток)
+    - **LLM-Based Error Analysis**: Использование LLM для анализа ошибок Docker/установки зависимостей (`session.go:433-556`)
+    - **Configuration Correction**: Автоматическое предложение альтернативных Docker образов, команд установки и рабочих директорий
+    - **Retry Logic**: Применение исправлений между попытками настройки окружения (`session.go:175-194`)
+  - **Telegram Abstractions Integration**: Полный переход на существующие Telegram абстракции вместо прямых API вызовов
+    - **TelegramSender Interface**: Использование интерфейса `sender` из `internal/telegram/api.go` (`commands.go:15-18`)
+    - **MessageFormatter Interface**: Абстракция форматирования сообщений с методами `EscapeText()` и `ParseModeValue()` (`commands.go:21-24`)
+    - **Bot Interface Methods**: Добавлены публичные методы `EscapeText()` и `GetFile()` в Bot для совместимости (`bot.go:291-303`)
+  - **Project Analysis Unification**: Создан общий модуль анализа проектов для переиспользования логики определения языка
+    - **ProjectAnalysis Module**: Новый модуль `internal/projectanalysis` с унифицированным анализатором проектов (`analyzer.go`)
+    - **Language Detection**: Использование существующих наработок из `codevalidation` через общий интерфейс
+    - **Docker Adapter**: Адаптер для совместимости между старым `CodeAnalysisResult` и новым `ProjectInfo` (`docker_adapter.go`)
+  - **Strict JSON Protocol**: Реализация строгого JSON протокола для всех взаимодействий с LLM
+    - **VibeCodingLLMClient**: Специализированный клиент с JSON протоколом и retry логикой (`llm_protocol.go`)
+    - **Structured Requests**: Типизированные структуры `VibeCodingRequest` и `VibeCodingResponse` для надёжного общения
+    - **JSON Validation**: Валидация структуры ответов с fallback на legacy методы при ошибках
+    - **Auto-JSON Correction**: Автоматическое исправление некорректного JSON через дополнительные запросы к LLM
+  - **HTML Tag Compliance**: Использование только разрешённых HTML тегов согласно Telegram API документации
+    - **Plain Text Formatting**: Удаление недопустимых тегов `<b>`, `<pre><code>` из сообщений VibeCoding
+    - **Safe Message Formatting**: Использование `formatter.EscapeText()` для всех пользовательских сообщений
+    - **API Compliance**: Соответствие официальной документации https://core.telegram.org/api/entities
+
+## [Day 9 - Multi-MCP Gmail Integration, Progress Tracking & VibeCoding Mode]
 
 ### Fixed (2025-08-19)
 - **Critical Code Validation Workflow Fix**: Исправлен фундаментальный порядок операций в валидации кода
@@ -34,6 +183,20 @@ All notable changes to this project will be documented in this file.
   - **Header Display**: Отображение общего количества токенов в заголовке результата (`progress.go:170-174`)
   - **Estimation Functions**: Функции оценки токенов для анализа проекта, ответов на вопросы и анализа ошибок
   - **Cost Transparency**: Пользователи теперь видят сколько токенов потратил бот на обработку их запроса
+
+### Added (2025-08-20)
+- **VibeCoding Mode**: Полноценный интерактивный режим разработки кода
+  - **Session Management**: Система управления сессиями вайбкодинга (`internal/vibecoding/session.go`)
+  - **Archive Processing**: Автоматическое извлечение файлов из ZIP/TAR архивов (`internal/vibecoding/archive.go`)
+  - **Environment Setup**: Автоматическая настройка Docker окружения с поддержкой до 3 попыток
+  - **Language Detection**: Определение языка программирования по расширениям файлов
+  - **Docker Integration**: Полная интеграция с Docker для изолированной разработки
+  - **Test Generation**: Автоматическая генерация и запуск unit-тестов для различных языков
+  - **Interactive Commands**: Набор команд для работы с сессией (/vibecoding_info, /vibecoding_test, etc.)
+  - **Project Context**: Интеллектуальный анализ контекста проекта для LLM
+  - **Session Lifecycle**: Полный жизненный цикл сессии с возможностью завершения и получения архива
+  - **Multi-language Support**: Поддержка Python, JavaScript, Go, Java, Rust, C++
+  - **Archive Export**: Создание итогового архива со всеми изменениями и метаданными
 
 ## [Day 9 - Multi-MCP Gmail Integration & Progress Tracking]
 

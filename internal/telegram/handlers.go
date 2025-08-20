@@ -162,6 +162,17 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.handleAdminConfigCommands(msg)
 		return
 	}
+
+	// VibeCoding commands
+	if strings.HasPrefix(msg.Command(), "vibecoding_") {
+		ctx := context.Background()
+		err := b.vibeCodingHandler.HandleVibeCodingCommand(ctx, msg.From.ID, msg.Chat.ID, msg.Text)
+		if err != nil {
+			log.Printf("🔥 VibeCoding command failed: %v", err)
+		}
+		return
+	}
+
 	// Notion commands
 	if msg.Command() == "notion_save" {
 		b.handleNotionSave(msg)
@@ -325,6 +336,15 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 		}
 	}
 	b.logLLMRequest(msg.From.ID, "chat", contextMsgs)
+
+	// Проверяем активную VibeCoding сессию
+	if b.vibeCodingHandler != nil && !b.isTZMode(msg.From.ID) && msg.Document == nil {
+		// Проверяем, есть ли активная vibecoding сессия у пользователя
+		if err := b.vibeCodingHandler.HandleVibeCodingMessage(ctx, msg.From.ID, msg.Chat.ID, msg.Text); err == nil {
+			// Сообщение было обработано в vibecoding режиме
+			return
+		}
+	}
 
 	// Проверяем наличие файлов или архивов
 	if b.codeValidationWorkflow != nil && !b.isTZMode(msg.From.ID) && msg.Document != nil {
@@ -643,6 +663,13 @@ func (b *Bot) handleDocumentValidation(ctx context.Context, msg *tgbotapi.Messag
 		return
 	}
 
+	// Проверяем архивы для VibeCoding mode (архив без вопросов в описании)
+	if isArchiveFile(msg.Document.FileName) && strings.TrimSpace(msg.Caption) == "" {
+		log.Printf("🔥 Archive with no questions detected - starting VibeCoding mode")
+		b.handleVibeCodingArchive(ctx, msg)
+		return
+	}
+
 	// Получаем файл от Telegram
 	file, err := b.s.GetFile(tgbotapi.FileConfig{FileID: msg.Document.FileID})
 	if err != nil {
@@ -932,4 +959,57 @@ func (b *Bot) processTarGzArchive(data []byte, filename string) (map[string]stri
 
 	// Теперь обрабатываем как обычный TAR
 	return b.processTarArchive(uncompressedData, filename)
+}
+
+// isArchiveFile проверяет, является ли файл архивом
+func isArchiveFile(filename string) bool {
+	lowerFilename := strings.ToLower(filename)
+	return strings.HasSuffix(lowerFilename, ".zip") ||
+		strings.HasSuffix(lowerFilename, ".tar") ||
+		strings.HasSuffix(lowerFilename, ".tar.gz") ||
+		strings.HasSuffix(lowerFilename, ".tgz")
+}
+
+// handleVibeCodingArchive обрабатывает загрузку архива для VibeCoding режима
+func (b *Bot) handleVibeCodingArchive(ctx context.Context, msg *tgbotapi.Message) {
+	log.Printf("🔥 Starting VibeCoding archive processing for user %d", msg.From.ID)
+
+	// Получаем файл от Telegram
+	file, err := b.s.GetFile(tgbotapi.FileConfig{FileID: msg.Document.FileID})
+	if err != nil {
+		errorMsg := fmt.Sprintf("[vibecoding] ❌ Ошибка получения архива: %v", err)
+		b.sendMessage(msg.Chat.ID, errorMsg)
+		return
+	}
+
+	// Скачиваем файл
+	fileURL := file.Link(b.api.Token)
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		errorMsg := fmt.Sprintf("[vibecoding] ❌ Ошибка загрузки архива: %v", err)
+		b.sendMessage(msg.Chat.ID, errorMsg)
+		return
+	}
+	defer resp.Body.Close()
+
+	archiveData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		errorMsg := fmt.Sprintf("[vibecoding] ❌ Ошибка чтения архива: %v", err)
+		b.sendMessage(msg.Chat.ID, errorMsg)
+		return
+	}
+
+	// Передаем обработку VibeCoding handler
+	err = b.vibeCodingHandler.HandleArchiveUpload(
+		ctx,
+		msg.From.ID,
+		msg.Chat.ID,
+		archiveData,
+		msg.Document.FileName,
+		msg.Caption,
+	)
+
+	if err != nil {
+		log.Printf("🔥 VibeCoding archive processing failed: %v", err)
+	}
 }

@@ -22,6 +22,7 @@ import (
 	"ai-chatter/internal/notion"
 	"ai-chatter/internal/pending"
 	"ai-chatter/internal/storage"
+	"ai-chatter/internal/vibecoding"
 )
 
 const (
@@ -67,6 +68,8 @@ type Bot struct {
 	gmailWorkflow *agents.GmailSummaryWorkflow
 	// Code validation
 	codeValidationWorkflow *codevalidation.CodeValidationWorkflow
+	// VibeCoding handler
+	vibeCodingHandler *vibecoding.VibeCodingHandler
 }
 
 func New(
@@ -134,6 +137,10 @@ func New(
 		b.codeValidationWorkflow = codevalidation.NewCodeValidationWorkflow(llmClient, dockerClient)
 		log.Printf("✅ Code validation workflow initialized with Docker support")
 	}
+
+	// Инициализируем VibeCoding handler
+	b.vibeCodingHandler = vibecoding.NewVibeCodingHandler(b.s, b, llmClient)
+	log.Printf("✅ VibeCoding handler initialized")
 	// Try to preload model2 from file if present
 	if data, err := os.ReadFile("data/model2.txt"); err == nil {
 		m2 := strings.TrimSpace(string(data))
@@ -281,9 +288,19 @@ func (b *Bot) ParseModeValue() string {
 	return b.parseModeValue()
 }
 
+// EscapeText публичный метод для интерфейса MessageFormatter
+func (b *Bot) EscapeText(text string) string {
+	return b.escapeIfNeeded(text)
+}
+
 // Send публичный метод для интерфейса BotInterface
 func (b *Bot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
 	return b.s.Send(c)
+}
+
+// GetFile публичный метод для интерфейса TelegramSender
+func (b *Bot) GetFile(config tgbotapi.FileConfig) (tgbotapi.File, error) {
+	return b.s.GetFile(config)
 }
 
 func (b *Bot) Start(ctx context.Context) {

@@ -91,6 +91,7 @@ RUN echo '#!/bin/sh' > /app/start.sh && \
 
 # Открываем порт для Docker daemon (если нужен внешний доступ)
 EXPOSE 2375 2376
+EXPOSE 8080 8081
 
 # Запускаем бот через скрипт с Docker поддержкой
 CMD ["/app/start.sh"]
