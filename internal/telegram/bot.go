@@ -15,6 +15,7 @@ import (
 	"ai-chatter/internal/agents"
 	"ai-chatter/internal/analytics"
 	"ai-chatter/internal/auth"
+	"ai-chatter/internal/codevalidation"
 	"ai-chatter/internal/gmail"
 	"ai-chatter/internal/history"
 	"ai-chatter/internal/llm"
@@ -64,6 +65,8 @@ type Bot struct {
 	// Gmail integration
 	gmailClient   *gmail.GmailMCPClient
 	gmailWorkflow *agents.GmailSummaryWorkflow
+	// Code validation
+	codeValidationWorkflow *codevalidation.CodeValidationWorkflow
 }
 
 func New(
@@ -116,6 +119,20 @@ func New(
 			gmailClient,
 			mcpClient,
 		)
+	}
+
+	// Инициализируем Code Validation workflow
+	dockerClient, err := codevalidation.NewDockerClient()
+	if err != nil {
+		log.Printf("⚠️ Failed to initialize Docker client: %v", err)
+		log.Printf("🔧 Falling back to mock Docker client for code analysis without execution")
+		// Используем mock клиент вместо отключения функциональности
+		mockDockerClient := codevalidation.NewMockDockerClient()
+		b.codeValidationWorkflow = codevalidation.NewCodeValidationWorkflow(llmClient, mockDockerClient)
+		log.Printf("✅ Code validation workflow initialized in mock mode")
+	} else {
+		b.codeValidationWorkflow = codevalidation.NewCodeValidationWorkflow(llmClient, dockerClient)
+		log.Printf("✅ Code validation workflow initialized with Docker support")
 	}
 	// Try to preload model2 from file if present
 	if data, err := os.ReadFile("data/model2.txt"); err == nil {
@@ -257,6 +274,16 @@ func (b *Bot) parseModeValue() string {
 	default:
 		return tgbotapi.ModeMarkdown
 	}
+}
+
+// ParseModeValue публичный метод для внешних пакетов
+func (b *Bot) ParseModeValue() string {
+	return b.parseModeValue()
+}
+
+// Send публичный метод для интерфейса BotInterface
+func (b *Bot) Send(c tgbotapi.Chattable) (tgbotapi.Message, error) {
+	return b.s.Send(c)
 }
 
 func (b *Bot) Start(ctx context.Context) {
