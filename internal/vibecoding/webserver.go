@@ -110,8 +110,8 @@ func (ws *WebServer) handleVibeSession(w http.ResponseWriter, r *http.Request) {
 	log.Printf("🔍 Looking for VibeCoding session for user %d", userID)
 
 	// Получаем сессию
-	session, exists := ws.sessionManager.GetSession(userID)
-	if !exists {
+	session := ws.sessionManager.GetSession(userID)
+	if session == nil {
 		log.Printf("❌ VibeCoding session not found for user %d", userID)
 		availableSessions := ws.sessionManager.GetActiveSessions()
 		http.Error(w, fmt.Sprintf("VibeCoding session not found for user %d. Active sessions: %d", userID, availableSessions), http.StatusNotFound)
@@ -144,8 +144,8 @@ func (ws *WebServer) handleVibeAPI(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Получаем сессию
-	session, exists := ws.sessionManager.GetSession(userID)
-	if !exists {
+	session := ws.sessionManager.GetSession(userID)
+	if session == nil {
 		http.Error(w, "VibeCoding session not found", http.StatusNotFound)
 		return
 	}

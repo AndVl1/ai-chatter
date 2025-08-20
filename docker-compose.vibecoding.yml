@@ -1,0 +1,58 @@
+# Docker Compose для VibeCoding с внешним веб-интерфейсом
+version: '3.8'
+
+services:
+  # Основное приложение AI Chatter (включает VibeCoding внутренний API)
+  ai-chatter:
+    build: 
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"  # Внутренний API VibeCoding
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - vibecoding-sessions:/app/sessions
+    networks:
+      - vibecoding-network
+    environment:
+      - PORT=8080
+      - VIBECODING_ENABLED=true
+    restart: unless-stopped
+
+  # VibeCoding MCP сервер (отдельный процесс)
+  vibecoding-mcp:
+    build: 
+      context: .
+      dockerfile: docker/vibecoding-mcp/Dockerfile
+    volumes:
+      - vibecoding-sessions:/app/sessions
+    networks:
+      - vibecoding-network
+    environment:
+      - VIBECODING_SESSIONS_PATH=/app/sessions
+    restart: unless-stopped
+
+  # Внешний веб-интерфейс (взаимодействует с ai-chatter по HTTP API)
+  vibecoding-web:
+    build: 
+      context: docker/vibecoding-web
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"  # Веб-интерфейс доступен на порту 3000
+    networks:
+      - vibecoding-network
+    environment:
+      - NODE_ENV=production
+      - VIBECODING_API_URL=http://ai-chatter:8080
+      - PORT=3000
+    depends_on:
+      - ai-chatter
+    restart: unless-stopped
+
+networks:
+  vibecoding-network:
+    driver: bridge
+
+volumes:
+  vibecoding-sessions:
+    driver: local

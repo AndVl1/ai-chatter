@@ -154,8 +154,8 @@ func (h *VibeCodingHandler) HandleArchiveUpload(ctx context.Context, userID, cha
 
 // HandleVibeCodingCommand обрабатывает команды vibecoding режима
 func (h *VibeCodingHandler) HandleVibeCodingCommand(ctx context.Context, userID, chatID int64, command string) error {
-	session, exists := h.sessionManager.GetSession(userID)
-	if !exists {
+	session := h.sessionManager.GetSession(userID)
+	if session == nil {
 		text := "[vibecoding] ❌ У вас нет активной сессии вайбкодинга. Загрузите архив с кодом для начала."
 		return h.sendMessage(chatID, text)
 	}
@@ -179,8 +179,8 @@ func (h *VibeCodingHandler) HandleVibeCodingCommand(ctx context.Context, userID,
 
 // HandleVibeCodingMessage обрабатывает текстовые сообщения в vibecoding режиме
 func (h *VibeCodingHandler) HandleVibeCodingMessage(ctx context.Context, userID, chatID int64, messageText string) error {
-	session, exists := h.sessionManager.GetSession(userID)
-	if !exists {
+	session := h.sessionManager.GetSession(userID)
+	if session == nil {
 		return nil // Не наша задача если нет сессии
 	}
 
@@ -429,8 +429,8 @@ func (h *VibeCodingHandler) handleAutoCommand(ctx context.Context, chatID int64,
 
 // HandleAutoWorkRequest обрабатывает запрос на автономную работу с конкретной задачей
 func (h *VibeCodingHandler) HandleAutoWorkRequest(ctx context.Context, userID, chatID int64, task string) error {
-	session, exists := h.sessionManager.GetSession(userID)
-	if !exists {
+	session := h.sessionManager.GetSession(userID)
+	if session == nil {
 		text := "[vibecoding] ❌ У вас нет активной сессии вайбкодинга."
 		return h.sendMessage(chatID, text)
 	}

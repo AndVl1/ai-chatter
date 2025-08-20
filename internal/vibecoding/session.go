@@ -98,13 +98,21 @@ func (sm *SessionManager) CreateSession(userID, chatID int64, projectName string
 	return session, nil
 }
 
+// CreatedAt возвращает время создания сессии для совместимости с MCP
+func (s *VibeCodingSession) CreatedAt() time.Time {
+	return s.StartTime
+}
+
 // GetSession получает активную сессию пользователя
-func (sm *SessionManager) GetSession(userID int64) (*VibeCodingSession, bool) {
+func (sm *SessionManager) GetSession(userID int64) *VibeCodingSession {
 	sm.mutex.RLock()
 	defer sm.mutex.RUnlock()
 
 	session, exists := sm.sessions[userID]
-	return session, exists
+	if !exists {
+		return nil
+	}
+	return session
 }
 
 // EndSession завершает сессию пользователя
@@ -151,6 +159,13 @@ func (s *VibeCodingSession) SetupEnvironment(ctx context.Context) error {
 	defer s.mutex.Unlock()
 
 	log.Printf("🔥 Setting up environment for vibecoding session: %s", s.ProjectName)
+
+	// Запускаем VibeCoding MCP сервер в контейнере после создания
+	defer func() {
+		if s.ContainerID != "" {
+			go s.startMCPServerInContainer(ctx)
+		}
+	}()
 
 	maxAttempts := 3
 	var lastError error
@@ -325,6 +340,92 @@ func (s *VibeCodingSession) ExecuteCommand(ctx context.Context, command string) 
 		Language:    s.Analysis.Language,
 		DockerImage: s.Analysis.DockerImage,
 		Commands:    []string{command},
+		WorkingDir:  s.Analysis.WorkingDir,
+	}
+
+	return s.Docker.ExecuteValidation(ctx, s.ContainerID, tempAnalysis)
+}
+
+// ListFiles возвращает список всех файлов в сессии
+func (s *VibeCodingSession) ListFiles(ctx context.Context) ([]string, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	var files []string
+	for filename := range s.Files {
+		files = append(files, filename)
+	}
+	for filename := range s.GeneratedFiles {
+		files = append(files, filename+" (generated)")
+	}
+
+	return files, nil
+}
+
+// ReadFile читает содержимое файла
+func (s *VibeCodingSession) ReadFile(ctx context.Context, filename string) (string, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	// Сначала ищем в обычных файлах
+	if content, exists := s.Files[filename]; exists {
+		return content, nil
+	}
+
+	// Потом в сгенерированных файлах
+	if content, exists := s.GeneratedFiles[filename]; exists {
+		return content, nil
+	}
+
+	return "", fmt.Errorf("file not found: %s", filename)
+}
+
+// WriteFile записывает файл в сессию
+func (s *VibeCodingSession) WriteFile(ctx context.Context, filename, content string, generated bool) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	if generated {
+		s.GeneratedFiles[filename] = content
+	} else {
+		s.Files[filename] = content
+	}
+
+	// Также копируем в контейнер если он существует
+	if s.ContainerID != "" {
+		files := map[string]string{filename: content}
+		if err := s.Docker.CopyFilesToContainer(ctx, s.ContainerID, files); err != nil {
+			log.Printf("⚠️ Failed to copy file to container: %v", err)
+			// Не возвращаем ошибку, файл все равно сохранен в сессии
+		}
+	}
+
+	return nil
+}
+
+// ValidateCode валидирует код файла
+func (s *VibeCodingSession) ValidateCode(ctx context.Context, code, filename string) (*codevalidation.ValidationResult, error) {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+
+	if s.ContainerID == "" {
+		return nil, fmt.Errorf("session environment not set up")
+	}
+
+	// Используем команды валидации из анализа
+	if len(s.Analysis.Commands) == 0 {
+		return &codevalidation.ValidationResult{
+			Success:  true,
+			Output:   "No validation commands available",
+			ExitCode: 0,
+		}, nil
+	}
+
+	// Создаем временный анализ для валидации
+	tempAnalysis := &codevalidation.CodeAnalysisResult{
+		Language:    s.Analysis.Language,
+		DockerImage: s.Analysis.DockerImage,
+		Commands:    s.Analysis.Commands,
 		WorkingDir:  s.Analysis.WorkingDir,
 	}
 
@@ -602,4 +703,45 @@ func (s *VibeCodingSession) getProjectSpecificDetails(language string) string {
 	}
 
 	return details.String()
+}
+
+// startMCPServerInContainer запускает VibeCoding MCP сервер внутри контейнера
+func (s *VibeCodingSession) startMCPServerInContainer(ctx context.Context) {
+	if s.ContainerID == "" {
+		log.Printf("⚠️ Cannot start MCP server: no container ID")
+		return
+	}
+
+	log.Printf("🚀 Starting VibeCoding MCP server in container %s", s.ContainerID)
+
+	// Копируем исполняемый файл MCP сервера в контейнер
+	mcpServerPath := "./cmd/vibecoding-mcp-server/vibecoding-mcp-server"
+	copyCmd := fmt.Sprintf("docker cp %s %s:/workspace/vibecoding-mcp-server", mcpServerPath, s.ContainerID)
+
+	if _, err := s.Docker.ExecuteValidation(ctx, s.ContainerID, &codevalidation.CodeAnalysisResult{
+		Commands: []string{copyCmd},
+	}); err != nil {
+		log.Printf("❌ Failed to copy MCP server to container: %v", err)
+		return
+	}
+
+	// Делаем файл исполняемым
+	chmodCmd := "chmod +x /workspace/vibecoding-mcp-server"
+	if _, err := s.Docker.ExecuteValidation(ctx, s.ContainerID, &codevalidation.CodeAnalysisResult{
+		Commands: []string{chmodCmd},
+	}); err != nil {
+		log.Printf("❌ Failed to make MCP server executable: %v", err)
+		return
+	}
+
+	// Запускаем MCP сервер в фоне в контейнере
+	startCmd := "nohup /workspace/vibecoding-mcp-server > /tmp/mcp-server.log 2>&1 &"
+	if _, err := s.Docker.ExecuteValidation(ctx, s.ContainerID, &codevalidation.CodeAnalysisResult{
+		Commands: []string{startCmd},
+	}); err != nil {
+		log.Printf("❌ Failed to start MCP server in container: %v", err)
+		return
+	}
+
+	log.Printf("✅ VibeCoding MCP server started in container %s", s.ContainerID)
 }

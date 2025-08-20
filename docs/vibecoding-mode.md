@@ -2,42 +2,58 @@
 
 ## Overview
 
-VibeCoding Mode is an interactive development session that allows users to upload code archives, get real-time analysis, generate tests, and iteratively improve their projects with AI assistance. It provides a comprehensive development environment with automated test fixing, environment setup, and project visualization.
+VibeCoding Mode is an interactive development session that allows users to upload code archives, get real-time analysis, generate tests, and iteratively improve their projects with AI assistance. It provides a comprehensive development environment with automated test fixing, environment setup, project visualization, and now includes a full MCP (Model Context Protocol) server architecture with external web interface.
 
 ## Table of Contents
 
 1. [Architecture](#architecture)
 2. [Core Components](#core-components)
-3. [Session Management](#session-management)
-4. [LLM Integration](#llm-integration)
-5. [Test System](#test-system)
-6. [Web Interface](#web-interface)
-7. [Usage Guide](#usage-guide)
-8. [API Reference](#api-reference)
-9. [Configuration](#configuration)
-10. [Troubleshooting](#troubleshooting)
+3. [MCP Server Architecture](#mcp-server-architecture)
+4. [External Web Interface](#external-web-interface)
+5. [Session Management](#session-management)
+6. [LLM Integration](#llm-integration)
+7. [Test System](#test-system)
+8. [Web Interface](#web-interface)
+9. [Usage Guide](#usage-guide)
+10. [API Reference](#api-reference)
+11. [Configuration](#configuration)
+12. [Troubleshooting](#troubleshooting)
 
 ## Architecture
 
 VibeCoding mode is built with a modular architecture consisting of several key components:
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Telegram Bot  │────│  VibeCoding     │────│   LLM Client    │
-│                 │    │   Handler       │    │                 │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                              │
-                    ┌─────────┼─────────┐
-                    │                   │
-          ┌─────────────────┐    ┌─────────────────┐
-          │ Session Manager │    │  Web Server     │
-          │                 │    │                 │
-          └─────────────────┘    └─────────────────┘
-                    │                   │
-          ┌─────────────────┐    ┌─────────────────┐
-          │ Docker Adapter  │    │  File Viewer    │
-          │                 │    │                 │
-          └─────────────────┘    └─────────────────┘
+┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────┐
+│   Telegram Bot      │────│  VibeCoding         │────│   LLM Client    │
+│                     │    │   Handler           │    │                 │
+└─────────────────────┘    └─────────────────────┘    └─────────────────┘
+                                      │
+                        ┌─────────────┼─────────────┐
+                        │                           │
+            ┌─────────────────────┐    ┌─────────────────────┐
+            │ Session Manager     │    │  Internal Web       │
+            │                     │    │  Server             │
+            └─────────────────────┘    └─────────────────────┘
+                        │
+              ┌─────────┼─────────┐
+              │                   │
+    ┌─────────────────┐    ┌─────────────────────┐
+    │ Docker Adapter  │    │ VibeCoding MCP      │
+    │                 │    │ Server              │
+    └─────────────────┘    └─────────────────────┘
+              │                   │
+    ┌─────────────────┐           │ MCP Protocol
+    │ Docker          │           │ (stdin/stdout)
+    │ Containers      │           │
+    │ + MCP Server    │           │
+    └─────────────────┘           │
+                                  │
+                      ┌─────────────────────┐
+                      │ External Web        │
+                      │ Interface           │
+                      │ (localhost:3000)    │
+                      └─────────────────────┘
 ```
 
 ### Key Features
@@ -45,9 +61,170 @@ VibeCoding mode is built with a modular architecture consisting of several key c
 - **Interactive Development**: Real-time code analysis and improvement suggestions
 - **Automated Environment Setup**: Docker-based isolated environments with LLM-guided configuration
 - **Intelligent Test Generation**: Automatic test creation with iterative fixing based on execution results
-- **Web Interface**: Browser-based project visualization and file exploration
-- **MCP Integration**: Model Context Protocol for direct LLM access to project files
+- **Dual Web Interface**: 
+  - Internal web server for basic project visualization
+  - External web interface with full MCP integration for advanced interaction
+- **Full MCP Server**: Complete Model Context Protocol server running inside containers
+- **External MCP Client**: Dedicated web interface communicating via MCP protocol
 - **Multi-Language Support**: Python, JavaScript/TypeScript, Go, Java, and more
+- **Container Orchestration**: Docker Compose setup for scalable deployment
+- **LLM-Based Architecture**: Removed all hardcoded language patterns in favor of unified LLM approach
+
+## MCP Server Architecture
+
+### VibeCoding MCP Server (`cmd/vibecoding-mcp-server/main.go`)
+
+The VibeCoding MCP Server is a complete Model Context Protocol implementation that provides programmatic access to VibeCoding sessions. It follows the same architecture as Gmail and Notion MCP servers.
+
+```go
+type VibeCodingMCPServer struct {
+    sessionManager *vibecoding.SessionManager
+}
+```
+
+**Registered MCP Tools:**
+
+1. **`vibe_list_files`** - List all files in workspace
+   - Parameters: `user_id`
+   - Returns: Array of filenames with metadata
+
+2. **`vibe_read_file`** - Read file content
+   - Parameters: `user_id`, `filename`
+   - Returns: File content and metadata
+
+3. **`vibe_write_file`** - Write/update file
+   - Parameters: `user_id`, `filename`, `content`, `generated`
+   - Returns: Success status and file info
+
+4. **`vibe_execute_command`** - Execute shell command
+   - Parameters: `user_id`, `command`
+   - Returns: Command output, exit code, success status
+
+5. **`vibe_validate_code`** - Validate code syntax/compilation
+   - Parameters: `user_id`, `filename`
+   - Returns: Validation results with errors/warnings
+
+6. **`vibe_run_tests`** - Execute test suite
+   - Parameters: `user_id`, `test_file` (optional)
+   - Returns: Test results and output
+
+7. **`vibe_get_session_info`** - Get session metadata
+   - Parameters: `user_id`
+   - Returns: Session status, container info, timestamps
+
+### MCP Communication Protocol
+
+The server communicates via standard stdin/stdout JSON-RPC 2.0:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "vibe_read_file",
+    "arguments": {
+      "user_id": 123456,
+      "filename": "main.py"
+    }
+  }
+}
+```
+
+### Docker Integration
+
+The MCP server is automatically deployed inside each coding container:
+
+1. **Container Creation**: When a VibeCoding session starts, the system creates a Docker container
+2. **MCP Server Deployment**: The `vibecoding-mcp-server` binary is copied into the container
+3. **Auto-Start**: The MCP server starts automatically as a background process
+4. **External Access**: External clients can connect to the MCP server for direct file/command access
+
+## External Web Interface
+
+### Architecture (`docker/vibecoding-web/`)
+
+The external web interface runs in a separate Docker container and communicates with VibeCoding sessions exclusively through the MCP protocol.
+
+```
+External Web Container (Node.js + Express)
+    ↓ HTTP API
+Web UI (HTML/CSS/JavaScript)
+    ↓ RESTful calls
+MCP Client (Native Node.js implementation)
+    ↓ stdin/stdout JSON-RPC
+VibeCoding MCP Server (inside coding containers)
+    ↓ Direct API calls
+VibeCoding Session Manager
+```
+
+### Web Interface Features
+
+1. **Session Management**
+   - Load sessions by User ID
+   - Display session information and status
+   - Real-time connection status monitoring
+
+2. **File Management**
+   - Interactive file browser with tree view
+   - Syntax-highlighted code editor
+   - Save changes directly to containers
+   - Distinguish between original and generated files
+
+3. **Terminal Interface**
+   - Execute commands in real-time
+   - Command history and auto-completion
+   - Scrollable output display
+   - Background command execution
+
+4. **Test Runner**
+   - One-click test execution
+   - Test result visualization
+   - Pass/fail status indicators
+   - Test output analysis
+
+### API Endpoints
+
+```javascript
+// File operations
+GET    /api/files/:userId              // List all files
+GET    /api/files/:userId/:filename    // Read file content
+POST   /api/files/:userId/:filename    // Write file content
+
+// Command execution
+POST   /api/execute/:userId           // Execute shell command
+POST   /api/test/:userId              // Run tests
+
+// Session management
+GET    /api/session/:userId           // Get session info
+GET    /api/status                    // Server status and MCP connection
+```
+
+### Docker Compose Deployment
+
+The system now supports full containerization:
+
+```yaml
+# docker-compose.vibecoding.yml
+services:
+  vibecoding-mcp:
+    build: docker/vibecoding-mcp/
+    volumes:
+      - /tmp/vibecoding-mcp:/tmp/vibecoding-mcp
+    
+  vibecoding-web:
+    build: docker/vibecoding-web/
+    ports:
+      - "3000:3000"
+    depends_on:
+      - vibecoding-mcp
+```
+
+**Startup Script:**
+
+```bash
+./scripts/start-vibecoding-web.sh
+```
 
 ## Core Components
 
@@ -72,10 +249,15 @@ type VibeCodingSession struct {
 ```
 
 **Key Methods:**
-- `SetupEnvironment(ctx)`: Configures Docker environment with up to 3 retry attempts
+- `SetupEnvironment(ctx)`: Configures Docker environment with up to 3 retry attempts and auto-starts MCP server
 - `ExecuteCommand(ctx, command)`: Runs commands in the container
+- `ListFiles(ctx)`: Returns list of all files in session
+- `ReadFile(ctx, filename)`: Reads content of a specific file
+- `WriteFile(ctx, filename, content, generated)`: Writes file to session and container
+- `ValidateCode(ctx, code, filename)`: Validates code using container environment
 - `AddGeneratedFile(filename, content)`: Adds AI-generated files
 - `GetAllFiles()`: Returns combined original and generated files
+- `CreatedAt()`: Returns session creation time for MCP compatibility
 - `Cleanup()`: Releases resources when session ends
 
 ### 2. SessionManager (`session.go`)
@@ -92,9 +274,10 @@ type SessionManager struct {
 
 **Key Methods:**
 - `CreateSession(userID, chatID, projectName, files, llmClient)`: Creates new session
-- `GetSession(userID)`: Retrieves active session
+- `GetSession(userID)`: Retrieves active session (now returns pointer only)
 - `EndSession(userID)`: Terminates session and cleanup
 - `HasActiveSession(userID)`: Checks if user has active session
+- `GetActiveSessions()`: Returns count of active sessions
 
 ### 3. VibeCodingHandler (`commands.go`)
 
@@ -292,73 +475,105 @@ func (h *VibeCodingHandler) handleTestCommand(ctx context.Context, chatID int64,
 }
 ```
 
-### Test File Detection
+### LLM-Based Test Detection
 
-The system intelligently identifies test files across multiple languages:
+**DEPRECATED**: Hardcoded test file detection has been completely removed and replaced with LLM-based analysis for maximum flexibility and accuracy across all programming languages.
 
-```go
-func (h *VibeCodingHandler) isTestFile(filename string) bool {
-    filename = strings.ToLower(filename)
-    
-    // Check prefixes and suffixes
-    if strings.HasPrefix(filename, "test_") || 
-       strings.HasSuffix(filename, "_test.py") ||
-       strings.HasSuffix(filename, "_test.go") ||
-       strings.HasSuffix(filename, ".test.js") ||
-       strings.HasSuffix(filename, ".spec.js") ||
-       strings.Contains(filename, "test") {
-        return true
-    }
-    
-    // Check directories
-    if strings.Contains(filename, "/test/") || 
-       strings.Contains(filename, "/tests/") {
-        return true
-    }
-    
-    return false
-}
-```
+The system now uses LLM analysis to:
+- Identify test files with context and confidence scoring
+- Determine test command compatibility with specific files
+- Adapt test commands for different file types
+- Generate appropriate test commands based on project structure
+
+This unified approach eliminates language-specific hardcoded patterns and provides better support for:
+- Custom testing frameworks
+- Non-standard file naming conventions
+- Multi-language projects
+- Emerging programming languages
 
 ## Web Interface
 
-### Project Visualization (`webserver.go`)
+VibeCoding now provides two complementary web interfaces:
 
-The web server provides a real-time view of the project structure and files:
+### 1. Internal Web Server (`webserver.go`)
+
+Basic project visualization integrated with the Telegram bot:
 
 - **URL Pattern**: `http://localhost:8080/vibe_{userID}`
+- **Purpose**: Quick project overview and file browsing
+- **Features**: File tree, basic file viewer, session stats
 - **Auto-refresh**: Updates every 30 seconds
-- **File Tree**: Interactive file browser with expand/collapse
-- **File Viewer**: Syntax-highlighted code display
-- **Session Stats**: Real-time session information
 
-### Key Endpoints
+### 2. External Web Interface (MCP-Based)
+
+Advanced web interface with full MCP integration:
+
+- **URL**: `http://localhost:3000`
+- **Purpose**: Complete project management and development environment
+- **Architecture**: Separate Docker container communicating via MCP protocol
+- **Features**: 
+  - Interactive file editor with syntax highlighting
+  - Real-time terminal with command execution
+  - Integrated test runner
+  - Session management dashboard
+  - Live connection status monitoring
+
+### Key Endpoints (Internal)
 
 - `GET /vibe_{userID}`: Main project page
 - `GET /api/vibe_{userID}`: JSON session data
 - `GET /api/vibe_{userID}/file/{filepath}`: File content
 - `GET /static/...`: Static assets (CSS, JS)
 
-### Features
+### Key Endpoints (External MCP)
 
-- **Dark Theme**: IDE-style interface
-- **File Type Icons**: Visual file type identification
-- **Generated File Highlighting**: Distinguishes AI-generated files
-- **Responsive Design**: Works on various screen sizes
-- **Real-time Updates**: Reflects changes as they happen
+- `GET /api/files/:userId`: List files via MCP
+- `GET /api/files/:userId/:filename`: Read file via MCP
+- `POST /api/files/:userId/:filename`: Write file via MCP
+- `POST /api/execute/:userId`: Execute commands via MCP
+- `POST /api/test/:userId`: Run tests via MCP
+- `GET /api/session/:userId`: Session info via MCP
+- `GET /api/status`: MCP connection status
+
+### Technology Stack
+
+**Internal Server:**
+- Go + HTML templates
+- WebSocket for real-time updates
+- Static file serving
+
+**External Interface:**
+- Node.js + Express backend
+- Vanilla JavaScript frontend
+- MCP client for container communication
+- Docker containerization
 
 ## Usage Guide
 
 ### Starting a VibeCoding Session
+
+#### Method 1: Traditional Telegram Bot Workflow
 
 1. **Prepare Archive**: Create a .zip/.tar.gz archive of your project
 2. **Upload**: Send the archive to the Telegram bot without any caption
 3. **Wait for Setup**: The system will automatically:
    - Extract files
    - Analyze the project with LLM
-   - Set up Docker environment
+   - Set up Docker environment with MCP server
    - Install dependencies
-4. **Receive Confirmation**: Get session details and web interface URL
+   - Deploy VibeCoding MCP server inside container
+4. **Receive Confirmation**: Get session details and both web interface URLs
+
+#### Method 2: External Web Interface (New)
+
+1. **Start VibeCoding System**: Run `./scripts/start-vibecoding-web.sh`
+2. **Access Web Interface**: Open `http://localhost:3000`
+3. **Load Session**: Enter User ID and click "Load Session"
+4. **Interactive Development**: Use the full-featured web interface for:
+   - File editing and management
+   - Command execution
+   - Test running
+   - Real-time project monitoring
 
 ### Example Session Flow
 
@@ -367,23 +582,33 @@ User: [Uploads Python project archive]
 Bot: 🔥 Сессия вайбкодинга готова!
      Проект: my-python-app
      Язык: Python
-     🌐 Веб-интерфейс: http://localhost:8080/vibe_123
+     🔧 MCP сервер запущен в контейнере
+     🌐 Внутренний интерфейс: http://localhost:8080/vibe_123
+     🌐 Внешний интерфейс: http://localhost:3000 (User ID: 123)
 
-User: /vibecoding_generate_tests
-Bot: 🧠 Генерация тестов...
-     ✅ Тесты сгенерированы и сохранены в проект
-     📝 Сгенерированный файл: test_main.py
+User: [Opens external web interface at localhost:3000]
+      [Enters User ID: 123 and clicks "Load Session"]
+Web:  ✅ Session loaded successfully
+      📁 Files: main.py, requirements.txt, README.md
+      📊 Status: Active, Container: abc123
 
-User: /vibecoding_test
-Bot: 🧪 Запуск тестов...
-     ✅ Тесты выполнены успешно
+User: [Clicks "Run Tests" in web interface]
+Web:  🧪 Running tests...
+      ✅ All tests passed (3/3)
 
-User: "Add error handling to the main function"
-Bot: [Provides code improvements and explanations]
+User: [Edits main.py in web editor, adds error handling]
+      [Clicks "Save"]
+Web:  💾 File saved successfully
 
-User: /vibecoding_end
-Bot: 🔥 Сессия завершена
-     [Sends archive with all original and generated files]
+User: [Executes "python main.py" in web terminal]
+Web:  $ python main.py
+      Hello World with error handling!
+      $ 
+
+User: /vibecoding_end (in Telegram)
+Bot:  🔥 Сессия завершена
+      📦 MCP сервер остановлен
+      [Sends archive with all original and generated files]
 ```
 
 ### Interactive Commands
@@ -426,11 +651,17 @@ Bot: 🔥 Сессия завершена
 #### VibeCodingSession
 
 ```go
-// Create and setup environment
+// Create and setup environment with MCP server auto-start
 func (s *VibeCodingSession) SetupEnvironment(ctx context.Context) error
 
 // Execute commands in container
 func (s *VibeCodingSession) ExecuteCommand(ctx context.Context, command string) (*ValidationResult, error)
+
+// MCP-compatible file operations
+func (s *VibeCodingSession) ListFiles(ctx context.Context) ([]string, error)
+func (s *VibeCodingSession) ReadFile(ctx context.Context, filename string) (string, error)
+func (s *VibeCodingSession) WriteFile(ctx context.Context, filename, content string, generated bool) error
+func (s *VibeCodingSession) ValidateCode(ctx context.Context, code, filename string) (*ValidationResult, error)
 
 // Add generated files
 func (s *VibeCodingSession) AddGeneratedFile(filename, content string)
@@ -440,6 +671,9 @@ func (s *VibeCodingSession) GetAllFiles() map[string]string
 
 // Get session information
 func (s *VibeCodingSession) GetSessionInfo() map[string]interface{}
+
+// MCP compatibility
+func (s *VibeCodingSession) CreatedAt() time.Time
 
 // Cleanup resources
 func (s *VibeCodingSession) Cleanup() error
@@ -451,14 +685,17 @@ func (s *VibeCodingSession) Cleanup() error
 // Create new session
 func (sm *SessionManager) CreateSession(userID, chatID int64, projectName string, files map[string]string, llmClient llm.Client) (*VibeCodingSession, error)
 
-// Get existing session
-func (sm *SessionManager) GetSession(userID int64) (*VibeCodingSession, bool)
+// Get existing session (returns pointer only)
+func (sm *SessionManager) GetSession(userID int64) *VibeCodingSession
 
 // End session
 func (sm *SessionManager) EndSession(userID int64) error
 
 // Check if session exists
 func (sm *SessionManager) HasActiveSession(userID int64) bool
+
+// Get active session count
+func (sm *SessionManager) GetActiveSessions() int
 ```
 
 #### VibeCodingHandler
@@ -472,6 +709,27 @@ func (h *VibeCodingHandler) HandleVibeCodingCommand(ctx context.Context, userID,
 
 // Handle text messages
 func (h *VibeCodingHandler) HandleVibeCodingMessage(ctx context.Context, userID, chatID int64, messageText string) error
+```
+
+### MCP Server API
+
+#### VibeCodingMCPServer
+
+```go
+// MCP tool implementations
+func (s *VibeCodingMCPServer) ListFiles(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) ReadFile(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) WriteFile(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) ExecuteCommand(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) ValidateCode(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) RunTests(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) GetSessionInfo(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
 ```
 
 ### LLM Protocol
@@ -528,16 +786,22 @@ func (h *VibeCodingHandler) HandleVibeCodingMessage(ctx context.Context, userID,
 # Docker configuration
 DOCKER_HOST=unix:///var/run/docker.sock
 
-# VibeCoding MCP server path
-VIBECODING_MCP_SERVER_PATH=./vibecoding-mcp-server
+# VibeCoding MCP server configuration
+VIBECODING_MCP_SERVER_PATH=./cmd/vibecoding-mcp-server/vibecoding-mcp-server
+MCP_SOCKET_PATH=/tmp/vibecoding-mcp
 
-# Web server port (default: 8080)
-VIBECODING_WEB_PORT=8080
+# Web server ports
+VIBECODING_WEB_PORT=8080    # Internal web server
+PORT=3000                   # External web interface
 
 # LLM configuration
 LLM_PROVIDER=openai
 LLM_MODEL=gpt-4
 LLM_API_KEY=your-api-key
+
+# Docker Compose configuration
+COMPOSE_PROJECT_NAME=vibecoding
+COMPOSE_FILE=docker-compose.vibecoding.yml
 ```
 
 ### Docker Images
@@ -573,13 +837,19 @@ const (
    - Check Docker is running
    - Verify project has valid configuration files (package.json, requirements.txt, etc.)
    - Check logs for specific error messages
+   - Ensure VibeCoding MCP server binary is built
 
-3. **Tests Don't Generate**
-   - Ensure project has clear structure
-   - Add comments to explain complex code
-   - Try smaller, focused requests
+3. **MCP Server Issues**
+   - Verify MCP server is built: `go build -o ./cmd/vibecoding-mcp-server/vibecoding-mcp-server ./cmd/vibecoding-mcp-server/`
+   - Check container has MCP server: `docker exec <container_id> ls -la /workspace/vibecoding-mcp-server`
+   - View MCP server logs: `docker exec <container_id> cat /tmp/mcp-server.log`
 
-4. **Web Interface Not Accessible**
+4. **External Web Interface Issues**
+   - Check MCP connection status: `curl http://localhost:3000/api/status`
+   - Verify containers are running: `docker-compose -f docker-compose.vibecoding.yml ps`
+   - Check web interface logs: `docker-compose -f docker-compose.vibecoding.yml logs vibecoding-web`
+
+5. **Internal Web Interface Not Accessible**
    - Check if port 8080 is available
    - Verify session is active
    - Try refreshing the page
@@ -593,11 +863,25 @@ docker ps
 # View container logs
 docker logs <container_id>
 
-# Check web server
+# Check internal web server
 curl http://localhost:8080/
 
-# View session status
+# Check external web interface
+curl http://localhost:3000/api/status
+
+# View session status (internal)
 curl http://localhost:8080/vibe_<user_id>
+
+# View session status (external MCP)
+curl http://localhost:3000/api/session/<user_id>
+
+# VibeCoding system status
+docker-compose -f docker-compose.vibecoding.yml ps
+docker-compose -f docker-compose.vibecoding.yml logs
+
+# MCP server debug
+docker exec <container_id> ps aux | grep vibecoding-mcp-server
+docker exec <container_id> netstat -tlnp | grep 8090
 ```
 
 ### Log Messages
@@ -609,6 +893,10 @@ The system provides detailed logging with emoji indicators:
 - 🐳 Docker operations
 - 🌐 Web server events
 - 🔧 Fixing operations
+- 📤 MCP requests/responses
+- 🔗 MCP connection events
+- 💻 Terminal operations
+- 📁 File operations
 - ✅ Success operations
 - ❌ Error operations
 
@@ -619,22 +907,44 @@ The system includes automatic error recovery mechanisms:
 1. **Environment Setup**: Up to 3 retry attempts with LLM-guided fixes
 2. **Test Execution**: Automatic fixing of failing tests
 3. **Container Issues**: Automatic container recreation
-4. **Resource Cleanup**: Automatic cleanup on session end
+4. **MCP Connection**: Automatic reconnection and retry logic
+5. **File Operations**: Graceful handling of file access errors
+6. **Resource Cleanup**: Automatic cleanup on session end
 
 ## Performance Considerations
 
 - **Memory**: Each session uses 100-500MB depending on project size
-- **CPU**: LLM requests are the main performance bottleneck
+- **CPU**: LLM requests are the main performance bottleneck  
 - **Storage**: Temporary files are cleaned up automatically
 - **Network**: Docker image downloads only occur once per image
+- **MCP Overhead**: Minimal additional overhead for protocol communication
+- **Scalability**: External web interface allows multiple concurrent sessions
 
 ## Security
 
 - **Isolation**: Each session runs in a separate Docker container
 - **File Access**: Limited to uploaded project files
-- **Network**: No external network access from containers
+- **Network**: Controlled external network access from containers
+- **MCP Security**: Communication isolated to containers and authorized clients
+- **External Interface**: Runs in separate container with no direct file system access
 - **Cleanup**: All resources are cleaned up on session end
+
+## Recent Changes
+
+### Version 2.0 - MCP Architecture Update
+
+- ✅ **Full MCP Server**: Complete Model Context Protocol implementation
+- ✅ **External Web Interface**: Separate containerized web interface with MCP communication
+- ✅ **Docker Compose**: Orchestrated deployment with `docker-compose.vibecoding.yml`
+- ✅ **LLM-Based Architecture**: Removed all hardcoded language patterns
+- ✅ **7 MCP Tools**: Complete set of tools for file/command/test operations
+- ✅ **Auto MCP Deployment**: Automatic MCP server deployment in containers
+- ✅ **Dual Interface**: Both internal (port 8080) and external (port 3000) interfaces
+- ✅ **Startup Scripts**: Automated deployment with `./scripts/start-vibecoding-web.sh`
 
 ---
 
-For more information or support, please refer to the main project documentation or create an issue in the repository.
+For more information or support, please refer to:
+- Main project documentation
+- `README-VIBECODING-MCP.md` for detailed MCP architecture guide
+- Create an issue in the repository for bugs or feature requests
