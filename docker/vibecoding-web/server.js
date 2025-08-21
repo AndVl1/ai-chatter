@@ -131,8 +131,8 @@ class VibeCodingAPIClient {
     // Прочитать файл
     async readFile(userId, filename) {
         try {
-            // Убираем "(generated)" суффикс если есть
-            const cleanFilename = filename.replace(' (generated)', '');
+            // Убираем "[generated] " префикс и "(generated)" суффикс если есть
+            let cleanFilename = filename.replace(/^\[generated\]\s+/, '').replace(' (generated)', '');
             
             const response = await fetch(`${this.baseURL}/api/vibe_${userId}/file/${encodeURIComponent(cleanFilename)}`, {
                 method: 'GET',
