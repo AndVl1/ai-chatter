@@ -133,7 +133,7 @@ func (h *VibeCodingHandler) HandleArchiveUpload(ctx context.Context, userID, cha
 Язык: %s
 Команда тестов: %s
 
-🌐 Веб-интерфейс: http://localhost:8080/vibe_%d
+🌐 Веб-интерфейс: http://localhost:3000?user=%d
 
 Доступные команды:
 /vibecoding_info - информация о сессии

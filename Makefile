@@ -102,8 +102,8 @@ install: build ## Установить в GOPATH/bin
 	@go install cmd/notion-mcp-server/main.go
 	@echo "$(GREEN)✅ Installation completed$(NC)"
 
-docker-build: ## Собрать Docker образ
-	@echo "$(BLUE)🐳 Building Docker image...$(NC)"
+docker-single: ## Собрать один Docker образ
+	@echo "$(BLUE)🐳 Building single Docker image...$(NC)"
 	@docker build -t ai-chatter:$(GIT_COMMIT) .
 	@docker tag ai-chatter:$(GIT_COMMIT) ai-chatter:latest
 	@echo "$(GREEN)✅ Docker image built$(NC)"
@@ -135,7 +135,49 @@ profile-mem: ## Memory профилирование
 		echo "View with: go tool pprof mem.prof"; \
 	fi
 
+# Docker команды
+docker-build: ## Собрать все Docker образы
+	@echo "$(BLUE)🐳 Building Docker images...$(NC)"
+	@docker-compose -f docker-compose.full.yml build
+	@echo "$(GREEN)✅ Docker images built$(NC)"
+
+start: ## Запустить всю систему (полная конфигурация)
+	@echo "$(BLUE)🚀 Starting full AI Chatter system...$(NC)"
+	@./start-ai-chatter.sh
+
+start-basic: ## Запустить только основной бот
+	@echo "$(BLUE)🤖 Starting basic AI Chatter bot...$(NC)"
+	@./start-ai-chatter.sh basic
+
+start-vibe: ## Запустить с VibeCoding
+	@echo "$(BLUE)🔥 Starting AI Chatter with VibeCoding...$(NC)"
+	@./start-ai-chatter.sh vibecoding
+
+stop: ## Остановить все Docker контейнеры
+	@echo "$(BLUE)🛑 Stopping AI Chatter system...$(NC)"
+	@docker-compose -f docker-compose.full.yml down 2>/dev/null || true
+	@docker-compose -f docker-compose.vibecoding.yml down 2>/dev/null || true
+	@docker-compose -f docker-compose.yml down 2>/dev/null || true
+	@echo "$(GREEN)✅ System stopped$(NC)"
+
+logs: ## Показать логи всех сервисов
+	@echo "$(BLUE)📋 Showing logs...$(NC)"
+	@docker-compose -f docker-compose.full.yml logs -f
+
+status: ## Показать статус всех контейнеров
+	@echo "$(BLUE)📊 System status:$(NC)"
+	@docker-compose -f docker-compose.full.yml ps 2>/dev/null || echo "$(YELLOW)No containers running$(NC)"
+
+restart: stop start ## Перезапустить систему
+
+clean-docker: ## Очистить Docker данные
+	@echo "$(BLUE)🧹 Cleaning Docker data...$(NC)"
+	@docker system prune -f
+	@docker volume prune -f
+	@echo "$(GREEN)✅ Docker cleanup completed$(NC)"
+
 # Aliases для удобства
 all: ci ## Alias для 'ci'
 check: ci-fast ## Alias для 'ci-fast'
 fmt: format ## Alias для 'format'
+run: start ## Alias для 'start'

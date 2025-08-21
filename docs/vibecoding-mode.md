@@ -144,16 +144,16 @@ The MCP server is automatically deployed inside each coding container:
 
 ### Architecture (`docker/vibecoding-web/`)
 
-The external web interface runs in a separate Docker container and communicates with VibeCoding sessions exclusively through the MCP protocol.
+The external web interface runs in a separate Docker container and communicates with VibeCoding sessions through the internal HTTP API.
 
 ```
 External Web Container (Node.js + Express)
     ↓ HTTP API
 Web UI (HTML/CSS/JavaScript)
     ↓ RESTful calls
-MCP Client (Native Node.js implementation)
-    ↓ stdin/stdout JSON-RPC
-VibeCoding MCP Server (inside coding containers)
+VibeCoding HTTP API Client
+    ↓ HTTP requests (port 8080)
+VibeCoding Internal API
     ↓ Direct API calls
 VibeCoding Session Manager
 ```
@@ -187,17 +187,17 @@ VibeCoding Session Manager
 
 ```javascript
 // File operations
-GET    /api/files/:userId              // List all files
-GET    /api/files/:userId/:filename    // Read file content
-POST   /api/files/:userId/:filename    // Write file content
+GET    /api/files/:userId              // List all files (HTTP API)
+GET    /api/files/:userId/:filename    // Read file content (HTTP API)
+POST   /api/files/:userId/:filename    // Write file content (stub)
 
 // Command execution
-POST   /api/execute/:userId           // Execute shell command
-POST   /api/test/:userId              // Run tests
+POST   /api/execute/:userId           // Execute shell command (stub)
+POST   /api/test/:userId              // Run tests (stub)
 
 // Session management
-GET    /api/session/:userId           // Get session info
-GET    /api/status                    // Server status and MCP connection
+GET    /api/session/:userId           // Get session info (HTTP API)
+GET    /api/status                    // Server status and HTTP API connection
 ```
 
 ### Docker Compose Deployment
@@ -499,24 +499,23 @@ VibeCoding now provides two complementary web interfaces:
 
 Basic project visualization integrated with the Telegram bot:
 
-- **URL Pattern**: `http://localhost:8080/vibe_{userID}`
+- **URL Pattern**: `http://localhost:8080/api/vibe/{userID}` (internal API)
 - **Purpose**: Quick project overview and file browsing
 - **Features**: File tree, basic file viewer, session stats
 - **Auto-refresh**: Updates every 30 seconds
 
-### 2. External Web Interface (MCP-Based)
+### 2. External Web Interface (HTTP API-Based)
 
-Advanced web interface with full MCP integration:
+Advanced web interface with HTTP API integration:
 
 - **URL**: `http://localhost:3000`
 - **Purpose**: Complete project management and development environment
-- **Architecture**: Separate Docker container communicating via MCP protocol
+- **Architecture**: Separate Docker container communicating via HTTP API
 - **Features**: 
-  - Interactive file editor with syntax highlighting
-  - Real-time terminal with command execution
-  - Integrated test runner
+  - Interactive file browser and viewer
   - Session management dashboard
   - Live connection status monitoring
+  - File loading and display (read-only currently)
 
 ### Key Endpoints (Internal)
 
@@ -525,15 +524,15 @@ Advanced web interface with full MCP integration:
 - `GET /api/vibe_{userID}/file/{filepath}`: File content
 - `GET /static/...`: Static assets (CSS, JS)
 
-### Key Endpoints (External MCP)
+### Key Endpoints (External HTTP API)
 
-- `GET /api/files/:userId`: List files via MCP
-- `GET /api/files/:userId/:filename`: Read file via MCP
-- `POST /api/files/:userId/:filename`: Write file via MCP
-- `POST /api/execute/:userId`: Execute commands via MCP
-- `POST /api/test/:userId`: Run tests via MCP
-- `GET /api/session/:userId`: Session info via MCP
-- `GET /api/status`: MCP connection status
+- `GET /api/files/:userId`: List files via HTTP API
+- `GET /api/files/:userId/:filename`: Read file via HTTP API
+- `POST /api/files/:userId/:filename`: Write file (stub)
+- `POST /api/execute/:userId`: Execute commands (stub)
+- `POST /api/test/:userId`: Run tests (stub)
+- `GET /api/session/:userId`: Session info via HTTP API
+- `GET /api/status`: HTTP API connection status
 
 ### Technology Stack
 
@@ -545,7 +544,7 @@ Advanced web interface with full MCP integration:
 **External Interface:**
 - Node.js + Express backend
 - Vanilla JavaScript frontend
-- MCP client for container communication
+- HTTP API client for internal communication
 - Docker containerization
 
 ## Usage Guide
@@ -583,7 +582,7 @@ Bot: 🔥 Сессия вайбкодинга готова!
      Проект: my-python-app
      Язык: Python
      🔧 MCP сервер запущен в контейнере
-     🌐 Внутренний интерфейс: http://localhost:8080/vibe_123
+     🌐 Веб-интерфейс: http://localhost:3000
      🌐 Внешний интерфейс: http://localhost:3000 (User ID: 123)
 
 User: [Opens external web interface at localhost:3000]
@@ -869,8 +868,8 @@ curl http://localhost:8080/
 # Check external web interface
 curl http://localhost:3000/api/status
 
-# View session status (internal)
-curl http://localhost:8080/vibe_<user_id>
+# View session status (internal API)
+curl http://localhost:8080/api/vibe/<user_id>
 
 # View session status (external MCP)
 curl http://localhost:3000/api/session/<user_id>

@@ -115,6 +115,19 @@ func (sm *SessionManager) GetSession(userID int64) *VibeCodingSession {
 	return session
 }
 
+// GetAllSessions возвращает все активные сессии (для админки)
+func (sm *SessionManager) GetAllSessions() map[int64]*VibeCodingSession {
+	sm.mutex.RLock()
+	defer sm.mutex.RUnlock()
+
+	// Создаем копию карты для безопасности
+	sessionsCopy := make(map[int64]*VibeCodingSession)
+	for userID, session := range sm.sessions {
+		sessionsCopy[userID] = session
+	}
+	return sessionsCopy
+}
+
 // EndSession завершает сессию пользователя
 func (sm *SessionManager) EndSession(userID int64) error {
 	sm.mutex.Lock()

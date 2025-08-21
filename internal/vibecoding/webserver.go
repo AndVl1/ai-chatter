@@ -19,6 +19,7 @@ type WebServer struct {
 	sessionManager *SessionManager
 	server         *http.Server
 	port           int
+	startTime      time.Time
 }
 
 // FileNode представляет узел в дереве файлов
@@ -51,6 +52,7 @@ func NewWebServer(sessionManager *SessionManager, port int) *WebServer {
 	return &WebServer{
 		sessionManager: sessionManager,
 		port:           port,
+		startTime:      time.Now(),
 	}
 }
 
@@ -59,10 +61,12 @@ func (ws *WebServer) Start() error {
 	mux := http.NewServeMux()
 
 	// Регистрируем обработчики
-	mux.HandleFunc("/static/", ws.handleStatic)    // Статические файлы
-	mux.HandleFunc("/api/vibe_", ws.handleVibeAPI) // API для vibe сессий
-	mux.HandleFunc("/vibe_", ws.handleVibeSession) // HTML страницы vibe сессий
-	mux.HandleFunc("/", ws.handleRoot)             // Корневой обработчик (должен быть последним)
+	mux.HandleFunc("/static/", ws.handleStatic)        // Статические файлы
+	mux.HandleFunc("/api/status", ws.handleStatus)     // Health check endpoint
+	mux.HandleFunc("/api/sessions", ws.handleSessions) // Список всех сессий (админ)
+	mux.HandleFunc("/vibe_", ws.handleVibeSession)     // HTML страницы vibe сессий
+	mux.HandleFunc("/admin", ws.handleAdmin)           // Админская страница
+	mux.HandleFunc("/", ws.handleRoot)                 // Корневой обработчик (должен быть последним)
 
 	ws.server = &http.Server{
 		Addr:         fmt.Sprintf(":%d", ws.port),
@@ -132,7 +136,7 @@ func (ws *WebServer) handleVibeAPI(w http.ResponseWriter, r *http.Request) {
 	// Извлекаем userID из URL
 	path := strings.TrimPrefix(r.URL.Path, "/api/vibe_")
 	parts := strings.Split(path, "/")
-	if len(parts) == 0 {
+	if len(parts) == 0 || parts[0] == "" {
 		http.Error(w, "Invalid API path", http.StatusBadRequest)
 		return
 	}
@@ -748,6 +752,12 @@ func (ws *WebServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Проверяем, не API запрос ли это к vibe_ сессии
+	if strings.HasPrefix(r.URL.Path, "/api/vibe_") {
+		ws.handleVibeAPI(w, r)
+		return
+	}
+
 	// Проверяем, не запрос ли это к vibe_ сессии
 	if strings.HasPrefix(r.URL.Path, "/vibe_") {
 		ws.handleVibeSession(w, r)
@@ -756,4 +766,166 @@ func (ws *WebServer) handleRoot(w http.ResponseWriter, r *http.Request) {
 
 	// Для всех остальных путей возвращаем 404
 	http.NotFound(w, r)
+}
+
+// handleStatus обрабатывает health check запросы
+func (ws *WebServer) handleStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	response := map[string]interface{}{
+		"status":    "healthy",
+		"service":   "ai-chatter",
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+		"uptime":    time.Since(ws.startTime).String(),
+	}
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
+// handleSessions обрабатывает запросы на получение списка всех активных сессий (админ API)
+func (ws *WebServer) handleSessions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	sessions := ws.sessionManager.GetAllSessions()
+	sessionList := make([]map[string]interface{}, 0, len(sessions))
+
+	for userID, session := range sessions {
+		sessionInfo := map[string]interface{}{
+			"user_id":         userID,
+			"project_name":    session.ProjectName,
+			"language":        session.Analysis.Language,
+			"start_time":      session.StartTime,
+			"duration":        time.Since(session.StartTime).Round(time.Second).String(),
+			"container_id":    session.ContainerID,
+			"test_command":    session.TestCommand,
+			"files_count":     len(session.Files),
+			"generated_count": len(session.GeneratedFiles),
+		}
+		sessionList = append(sessionList, sessionInfo)
+	}
+
+	response := map[string]interface{}{
+		"success":        true,
+		"sessions":       sessionList,
+		"total_sessions": len(sessionList),
+		"timestamp":      time.Now().UTC().Format(time.RFC3339),
+	}
+
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "Internal server error", http.StatusInternalServerError)
+	}
+}
+
+// handleAdmin обрабатывает админскую страницу для просмотра всех сессий
+func (ws *WebServer) handleAdmin(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	adminHTML := `<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VibeCoding Admin - Active Sessions</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f5f5f5; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; margin-bottom: 20px; }
+        .stats { background: #e3f2fd; padding: 15px; border-radius: 5px; margin-bottom: 20px; }
+        .session-card { border: 1px solid #ddd; margin: 10px 0; padding: 15px; border-radius: 5px; background: #fafafa; }
+        .session-header { font-weight: bold; color: #1976d2; margin-bottom: 10px; }
+        .session-meta { font-size: 14px; color: #666; }
+        .session-actions { margin-top: 10px; }
+        .btn { padding: 8px 15px; background: #1976d2; color: white; text-decoration: none; border-radius: 3px; margin-right: 10px; }
+        .btn:hover { background: #1565c0; }
+        .refresh-btn { background: #4caf50; }
+        .no-sessions { text-align: center; color: #666; font-style: italic; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔥 VibeCoding Admin Panel</h1>
+        
+        <div class="stats">
+            <h3>System Status</h3>
+            <p id="session-count">Loading...</p>
+            <button onclick="loadSessions()" class="btn refresh-btn">🔄 Refresh</button>
+        </div>
+
+        <div id="sessions-container">
+            <p>Loading sessions...</p>
+        </div>
+    </div>
+
+    <script>
+        async function loadSessions() {
+            try {
+                const response = await fetch('/api/sessions');
+                const data = await response.json();
+                
+                document.getElementById('session-count').innerHTML = 
+                    ` + "`Active Sessions: ${data.total_sessions}`" + `;
+
+                const container = document.getElementById('sessions-container');
+                
+                if (data.sessions.length === 0) {
+                    container.innerHTML = '<div class="no-sessions">No active VibeCoding sessions</div>';
+                    return;
+                }
+
+                let html = '';
+                data.sessions.forEach(session => {
+                    html += ` + "`" + `
+                        <div class="session-card">
+                            <div class="session-header">
+                                👤 User ID: ${session.user_id} - ${session.project_name}
+                            </div>
+                            <div class="session-meta">
+                                📝 Language: ${session.language} | 
+                                ⏱️ Duration: ${session.duration} |
+                                📁 Files: ${session.files_count} + ${session.generated_count} generated
+                            </div>
+                            <div class="session-meta">
+                                🧪 Test Command: ${session.test_command || 'Not set'}
+                            </div>
+                            <div class="session-actions">
+                                <a href="/vibe_${session.user_id}" class="btn" target="_blank">🌐 View Session</a>
+                                <a href="http://localhost:3000?user=${session.user_id}" class="btn" target="_blank">🎨 External Interface</a>
+                            </div>
+                        </div>
+                    ` + "`" + `;
+                });
+                
+                container.innerHTML = html;
+                
+            } catch (error) {
+                document.getElementById('sessions-container').innerHTML = 
+                    ` + "`<div style='color: red;'>Error loading sessions: ${error.message}</div>`" + `;
+            }
+        }
+
+        // Load sessions on page load
+        loadSessions();
+        
+        // Auto-refresh every 30 seconds
+        setInterval(loadSessions, 30000);
+    </script>
+</body>
+</html>`
+
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(adminHTML))
 }

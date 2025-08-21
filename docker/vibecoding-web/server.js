@@ -72,22 +72,55 @@ class VibeCodingAPIClient {
             }
 
             const files = [];
-            const session = sessionInfo.data.session;
+            // sessionInfo.data содержит SessionData напрямую, не session wrapper
+            const sessionData = sessionInfo.data;
             
-            // Добавляем обычные файлы
-            if (session.files) {
-                Object.keys(session.files).forEach(filename => {
-                    files.push(filename);
-                });
+            // SessionData не содержит файлы напрямую, получаем через files_tree
+            if (sessionData.files_tree) {
+                this.extractFilesFromTree(sessionData.files_tree, files);
             }
             
-            // Добавляем сгенерированные файлы
-            if (session.generated_files) {
-                Object.keys(session.generated_files).forEach(filename => {
-                    files.push(filename + ' (generated)');
-                });
+            return { success: true, files };
+        } catch (error) {
+            console.error(`Failed to get files for user ${userId}:`, error);
+            return { success: false, error: error.message };
+        }
+    }
+
+    // Извлекаем файлы из дерева файлов
+    extractFilesFromTree(node, files) {
+        if (node.type === 'file') {
+            files.push(node.path);
+        }
+        
+        if (node.children) {
+            node.children.forEach(child => {
+                this.extractFilesFromTree(child, files);
+            });
+        }
+    }
+
+    // Получить список файлов (альтернативный метод)
+    async getFilesAlternative(userId) {
+        try {
+            const sessionInfo = await this.getSessionInfo(userId);
+            if (!sessionInfo.success) {
+                throw new Error(sessionInfo.error);
             }
 
+            const files = [];
+            // Получаем SessionData напрямую
+            const sessionData = sessionInfo.data;
+            
+            // Добавляем заглушку для обычных файлов (SessionData не содержит файлы напрямую)
+            // В будущем можно использовать отдельный API endpoint для получения списка файлов
+            if (sessionData.files_tree) {
+                this.extractFilesFromTree(sessionData.files_tree, files);
+            }
+            
+            // Добавляем сгенерированные файлы (если есть в дереве)
+            // В SessionData структуре сгенерированные файлы помечены префиксом "[generated]"
+            
             return { success: true, files, totalFiles: files.length };
         } catch (error) {
             console.error(`Failed to get files for user ${userId}:`, error);
@@ -341,17 +374,18 @@ app.get('/api/session/:userId', async (req, res) => {
         const result = await apiClient.getSessionInfo(userId);
         
         if (result.success) {
-            const session = result.data.session;
+            // result.data содержит SessionData напрямую, не вложенную в session
+            const sessionData = result.data;
             res.json({
                 success: true,
                 session: {
-                    user_id: userId,
-                    status: session.container_id ? 'Active' : 'No Container',
-                    container_id: session.container_id || '',
-                    test_command: session.test_command || '',
-                    created_at: session.start_time || new Date().toISOString(),
-                    project_name: session.project_name || 'Unknown',
-                    language: session.language || 'Unknown'
+                    user_id: sessionData.user_id || userId,
+                    status: 'Active', // Если сессия найдена, она активна
+                    container_id: '', // SessionData не содержит container_id
+                    test_command: '', // SessionData не содержит test_command
+                    created_at: sessionData.start_time || new Date().toISOString(),
+                    project_name: sessionData.project_name || 'Unknown',
+                    language: sessionData.language || 'Unknown'
                 },
                 message: 'Session info retrieved'
             });

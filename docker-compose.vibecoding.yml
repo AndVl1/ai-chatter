@@ -1,5 +1,4 @@
 # Docker Compose для VibeCoding с внешним веб-интерфейсом
-version: '3.8'
 
 services:
   # Основное приложение AI Chatter (включает VibeCoding внутренний API)
@@ -8,7 +7,7 @@ services:
       context: .
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"  # Внутренний API VibeCoding
+      - "8081:8080"  # Внутренний API VibeCoding
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - vibecoding-sessions:/app/sessions

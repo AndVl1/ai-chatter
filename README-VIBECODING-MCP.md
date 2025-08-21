@@ -13,7 +13,7 @@
 
 2. **External Web Interface** (`docker/vibecoding-web/`)
    - Внешний веб-интерфейс в отдельном контейнере
-   - Коммуникация с VibeCoding сессиями через MCP протокол
+   - Коммуникация с VibeCoding сессиями через HTTP API
    - Современный веб-интерфейс для управления файлами, командами и тестами
 
 3. **Docker Integration**
@@ -65,13 +65,13 @@
 
 ### API Endpoints:
 
-- `GET /api/files/:userId` - Список файлов
-- `GET /api/files/:userId/:filename` - Содержимое файла
-- `POST /api/files/:userId/:filename` - Сохранение файла
-- `POST /api/execute/:userId` - Выполнение команды
-- `POST /api/test/:userId` - Запуск тестов
-- `GET /api/session/:userId` - Информация о сессии
-- `GET /api/status` - Статус сервера и MCP соединения
+- `GET /api/files/:userId` - Список файлов (через HTTP API)
+- `GET /api/files/:userId/:filename` - Содержимое файла (через HTTP API)  
+- `POST /api/files/:userId/:filename` - Сохранение файла (заглушка)
+- `POST /api/execute/:userId` - Выполнение команды (заглушка)
+- `POST /api/test/:userId` - Запуск тестов (заглушка)
+- `GET /api/session/:userId` - Информация о сессии (через HTTP API)
+- `GET /api/status` - Статус сервера и HTTP API соединения
 
 ## Быстрый старт
 
@@ -79,7 +79,7 @@
 
 ```bash
 # Запуск всей системы одной командой
-./scripts/start-vibecoding-web.sh
+./start-ai-chatter.sh --full
 ```
 
 ### 2. Ручной запуск
@@ -89,7 +89,7 @@
 go build -o ./cmd/vibecoding-mcp-server/vibecoding-mcp-server ./cmd/vibecoding-mcp-server/
 
 # Запуск через Docker Compose
-docker-compose -f docker-compose.vibecoding.yml up --build -d
+docker-compose -f docker-compose.full.yml up --build -d
 ```
 
 ### 3. Доступ к интерфейсу
@@ -138,12 +138,12 @@ docker-compose -f docker-compose.vibecoding.yml up --build -d
 
 ```
 External Web Interface (port 3000)
-          ↓ MCP Protocol
-VibeCoding MCP Server (stdin/stdout)
+          ↓ HTTP API
+VibeCoding Internal API (port 8080)
           ↓ Direct API calls
 VibeCoding Session Manager
           ↓ Docker API
-Docker Containers (coding environments)
+Docker Containers (coding environments + MCP servers)
 ```
 
 ## Мониторинг и отладка

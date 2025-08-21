@@ -619,6 +619,18 @@ $ </div>
         document.addEventListener('DOMContentLoaded', () => {
             checkStatus();
             setInterval(checkStatus, 30000); // Check status every 30 seconds
+            
+            // Check for user parameter in URL and auto-load session
+            const urlParams = new URLSearchParams(window.location.search);
+            const userParam = urlParams.get('user');
+            if (userParam) {
+                const userIdInput = document.getElementById('user-id');
+                userIdInput.value = userParam;
+                // Auto-load session after a short delay to ensure status is checked first
+                setTimeout(() => {
+                    loadSession();
+                }, 1000);
+            }
         });
     </script>
 </body>

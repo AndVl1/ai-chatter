@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 ## [Day 9 - Multi-MCP Gmail Integration, Progress Tracking & VibeCoding Mode Enhanced]
 
+### Fixed (2025-08-21) - API Routing & Session Loading Issues
+- **API Endpoint Routing**: Исправлена маршрутизация API запросов `/api/vibe_*` через корневой обработчик
+  - **Route Handler**: Добавлена обработка API запросов в `handleRoot` для правильной маршрутизации (`internal/vibecoding/webserver.go:760-764`)
+  - **External Interface**: Устранены ошибки 404 при обращении external web interface к внутреннему API
+- **Documentation Updates**: Обновлена документация для отражения текущего состояния системы
+  - **Architecture Clarification**: Уточнена архитектура external web interface - использует HTTP API вместо MCP протокола
+  - **API Status**: Обновлены статусы API endpoints (реализованные vs заглушки) в документации
+  - **Deployment Guide**: Обновлены инструкции запуска системы для использования `docker-compose.full.yml`
+- **Session Data Format**: Исправлена ошибка TypeError при доступе к свойствам session объекта
+  - **Data Structure**: Исправлено обращение к `SessionData` напрямую вместо `result.data.session` (`docker/vibecoding-web/server.js:344-356`)
+  - **Property Access**: Устранены ошибки "Cannot read properties of undefined (reading 'container_id')"
+- **File Loading API**: Исправлена ошибка TypeError при получении списка файлов
+  - **API Integration**: Переработан метод `getFiles` для работы с `SessionData.files_tree` (`docker/vibecoding-web/server.js:67-88`)
+  - **Tree Parsing**: Добавлен метод `extractFilesFromTree` для извлечения файлов из структуры дерева
+  - **Error Handling**: Улучшена обработка ошибок при отсутствии файлов в сессии
+- **Session State Management**: Уточнено поведение системы - сессии хранятся в памяти и очищаются при перезапуске контейнеров
+
+### Enhanced (2025-08-21) - VibeCoding Web Interface & Admin Panel
+- **Direct Session Links**: Добавлены прямые ссылки на сессии пользователей в сообщениях о старте VibeCoding
+  - **URL Parameters**: Ссылки теперь содержат User ID для автоматической загрузки сессии (`internal/vibecoding/commands.go:136`)
+  - **Auto-loading**: External web interface автоматически загружает сессию по URL параметру `?user=123`
+- **Admin Panel**: Создана полнофункциональная административная панель для управления сессиями
+  - **Sessions API**: Добавлен `/api/sessions` endpoint для получения списка всех активных сессий (`internal/vibecoding/webserver.go:786-823`)
+  - **Admin Interface**: Веб-страница `/admin` с real-time мониторингом всех VibeCoding сессий (`internal/vibecoding/webserver.go:825-926`)
+  - **Session Management**: Добавлен `GetAllSessions()` метод в SessionManager (`internal/vibecoding/session.go:118-129`)
+- **Improved Error Handling**: Устранена 404 ошибка при получении информации о сессиях через external web interface
+
+### Fixed (2025-08-21) - Timing Issues & Docker Dependencies Resolution
+- **Container Startup Timing**: Полностью решены проблемы с синхронизацией запуска контейнеров
+  - **Health Check Implementation**: Добавлен `/api/status` endpoint в основное приложение (`internal/vibecoding/webserver.go:762-780`)
+  - **Service Dependencies**: Обновлены зависимости в Docker Compose для правильной последовательности запуска (`docker-compose.full.yml:92-94`)
+  - **Connection Stability**: External web interface теперь стартует только после готовности основного API
+- **Web Interface URL Corrections**: Исправлены все ссылки на веб-интерфейс VibeCoding
+  - **Commands.go Fix**: Обновлена ссылка в success message с `http://localhost:8080/vibe_%d` на `http://localhost:3000` (`internal/vibecoding/commands.go:136`)
+  - **Format String Fix**: Исправлена ошибка "Too many arguments for format string" - удален лишний `userID` аргумент (`commands.go:146-148`)
+  - **Documentation Updates**: Обновлены все ссылки в `docs/vibecoding-mode.md` на корректные URL внешнего веб-интерфейса
+- **Unified Startup System**: Проверены и подтверждены все инструкции для единой системы запуска через `make start`
+  - **Makefile Targets**: Корректные таргеты `start`, `start-basic`, `start-vibe` с правильными конфигурациями
+  - **Docker Compose Configs**: Все три конфигурации (`full`, `vibecoding`, `basic`) работают корректно
+  - **Quick Start Guide**: Обновлен `QUICK-START.md` с корректными портами и инструкциями
+
 ### Completed (2025-08-21) - VibeCoding MCP Server & External Web Interface Architecture
 - **VibeCoding MCP Server Implementation**: Создан полноценный MCP сервер для VibeCoding по аналогии с Gmail/Notion серверами
   - **7 Registered MCP Tools**: Реализованы все основные инструменты VibeCoding (`cmd/vibecoding-mcp-server/main.go:703-737`)
@@ -33,6 +74,17 @@ All notable changes to this project will be documented in this file.
   - **Container Isolation**: Внешний веб-интерфейс работает в изолированном контейнере
   - **Production Ready**: Готовая к продакшену архитектура с правильным разделением ответственности
   - **Scalable Design**: Масштабируемая архитектура с возможностью добавления дополнительных веб-интерфейсов
+- **Docker Build Fix**: Исправлена проблема сборки VibeCoding MCP сервера в Docker
+  - **Go Version Compatibility**: Обновлен Dockerfile с Go 1.22 на Go 1.23 для соответствия требованиям go.mod
+  - **Successful Docker Builds**: Все Docker образы собираются успешно (ai-chatter, vibecoding-mcp, vibecoding-web)
+  - **Docker Compose Testing**: Проверена работоспособность Docker Compose оркестрации
+  - **External Web Interface Validation**: Подтверждена работа внешнего веб-интерфейса на порту 3000 с корректными API ответами
+- **One-Command Startup System**: Создана система запуска всей архитектуры одной командой
+  - **Unified Docker Compose**: Создан `docker-compose.full.yml` для запуска всей системы (ai-chatter + vibecoding-mcp + vibecoding-web)
+  - **Smart Startup Script**: `start-ai-chatter.sh` с автоматической проверкой зависимостей, конфигурации и красивым выводом
+  - **Makefile Integration**: Интегрированы команды `make start`, `make stop`, `make status`, `make logs` для управления системой
+  - **Multi-Mode Support**: Поддержка 3 режимов запуска - полная система, только бот, бот + VibeCoding
+  - **Quick Start Guide**: Создан `QUICK-START.md` с простыми инструкциями по запуску всей системы
 
 ### Fixed (2025-08-20) - VibeCoding Docker Container & Environment Setup
 - **Fixed Docker Container Creation**: Исправлена критическая ошибка создания Docker контейнеров (exit status 125) (`docker.go:115-125`)
@@ -100,7 +152,7 @@ All notable changes to this project will be documented in this file.
   - **Server Configuration**: Оптимизация конфигурации веб-сервера (`webserver.go:66-75`)
     - **Localhost Binding**: Изменение привязки с 0.0.0.0 на localhost для локального доступа
     - **Timeout Settings**: Добавление таймаутов чтения, записи и idle для стабильности
-    - **URL Updates**: Обновление URL в сообщениях на http://localhost:8080
+    - **URL Updates**: Обновление URL в сообщениях на внешний веб-интерфейс http://localhost:3000
 
 ### Enhanced (2025-08-20) - Test Validation Refactoring
 - **VibeCoding Mode Test System Refactoring**: Унификация системы валидации тестов для использования LLM-подхода вместо захардкоженных команд
