@@ -13,8 +13,9 @@ import (
 
 // VibeCodingMCPClient клиент для работы с VibeCoding MCP сервером
 type VibeCodingMCPClient struct {
-	client  *mcp.Client
-	session *mcp.ClientSession
+	client     *mcp.Client
+	session    *mcp.ClientSession
+	httpServer *VibeCodingMCPHTTPServer
 }
 
 // NewVibeCodingMCPClient создает новый VibeCoding MCP клиент
@@ -53,12 +54,27 @@ func (m *VibeCodingMCPClient) Connect(ctx context.Context, sessionManager *Sessi
 	return nil
 }
 
+// ConnectHTTP подключается к VibeCoding MCP серверу через HTTP (fallback to stdio)
+func (m *VibeCodingMCPClient) ConnectHTTP(ctx context.Context, sessionManager *SessionManager) error {
+	log.Printf("🌐 Attempting to connect to VibeCoding MCP server via HTTP")
+	log.Printf("⚠️ HTTP transport not yet available in MCP SDK - falling back to stdio")
+
+	// For now, use the existing stdio connection
+	return m.Connect(ctx, sessionManager)
+}
+
 // Close закрывает соединение с VibeCoding MCP сервером
 func (m *VibeCodingMCPClient) Close() error {
+	var err error
 	if m.session != nil {
-		return m.session.Close()
+		err = m.session.Close()
 	}
-	return nil
+	if m.httpServer != nil {
+		if stopErr := m.httpServer.Stop(context.Background()); stopErr != nil && err == nil {
+			err = stopErr
+		}
+	}
+	return err
 }
 
 // ListFiles получает список файлов в VibeCoding сессии через MCP

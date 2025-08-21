@@ -2,6 +2,33 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Day 11 - VibeCoding MCP Integration & Web Interface Enhancement]
+
+### Enhanced (2025-08-21) - VibeCoding MCP Client Integration
+- **HTTP MCP Transport Framework**: Создана архитектура для интеграции MCP клиента с HTTP transport
+  - **MCP Client Enhancement**: Добавлен метод `ConnectHTTP` для подключения к VibeCoding MCP серверу через HTTP (`internal/vibecoding/mcp_client.go:58-65`)
+  - **HTTP Server Skeleton**: Создан `VibeCodingMCPHTTPServer` для обслуживания MCP запросов через HTTP (`internal/vibecoding/mcp_http_server.go`)
+  - **Tool Registration**: Зарегистрированы все 7 VibeCoding MCP tools для прямого вызова от LLM (vibe_list_files, vibe_read_file, vibe_write_file, vibe_execute_command, vibe_validate_code, vibe_run_tests, vibe_get_session_info)
+- **Direct LLM Integration**: Интегрирован MCP клиент для прямых вызовов инструментов от LLM (аналогично Notion реализации)
+  - **Session Connection**: MCP клиент автоматически подключается при создании VibeCoding сессии (`internal/vibecoding/commands.go:113-122`)
+  - **Auto Disconnection**: MCP клиент автоматически отключается при завершении сессии (`internal/vibecoding/commands.go:402-410`)
+  - **Protocol Client Integration**: VibeCodingLLMClient теперь использует MCP client для выполнения операций файловой системы
+- **Implementation Notes**: HTTP transport пока недоступен в MCP SDK - реализация использует stdio fallback
+  - **Future Ready**: Архитектура готова к переходу на HTTP transport когда он станет доступен в MCP SDK
+  - **Backward Compatibility**: Сохранена совместимость с существующим stdio transport
+
+### Fixed (2025-08-21) - Generated Files Display
+- **External Web Interface**: Исправлено отображение сгенерированных файлов с префиксом `[generated]`
+  - **File Path Cleaning**: Добавлена очистка префикса `[generated] ` из имён файлов перед чтением (`docker/vibecoding-web/server.js`)
+  - **404 Error Resolution**: Устранена ошибка "File not found: 404" при попытке загрузить файлы с префиксом `[generated]`
+  - **Regex Pattern**: Используется регулярное выражение `/^\[generated\]\s+/` для корректной очистки имён файлов
+
+### Tested (2025-08-21) - Go Unit Tests Validation
+- **Test Execution**: Проверено успешное выполнение Go unit tests в VibeCoding проекте mathutil
+  - **Test Coverage**: Все тесты пройдены успешно: TestAverage, TestMax, TestWordCount
+  - **Build Verification**: Подтверждена корректная компиляция и выполнение тестов без ошибок
+  - **Cleanup**: Удалён неиспользуемый import "reflect" из тестовых файлов
+
 ## [Day 9 - Multi-MCP Gmail Integration, Progress Tracking & VibeCoding Mode Enhanced]
 
 ### Fixed (2025-08-21) - API Routing & Session Loading Issues

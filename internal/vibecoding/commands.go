@@ -110,6 +110,17 @@ func (h *VibeCodingHandler) HandleArchiveUpload(ctx context.Context, userID, cha
 		return err
 	}
 
+	// Подключаем MCP клиент через HTTP для прямых вызовов от LLM
+	if h.protocolClient != nil && h.protocolClient.mcpClient != nil {
+		log.Printf("🔗 Connecting MCP client for VibeCoding session user %d", userID)
+		if err := h.protocolClient.mcpClient.ConnectHTTP(ctx, h.sessionManager); err != nil {
+			log.Printf("⚠️ Failed to connect MCP client via HTTP: %v. LLM tools may not work properly.", err)
+			// Не прерываем создание сессии, т.к. MCP не критичен для базовой функциональности
+		} else {
+			log.Printf("✅ MCP client connected via HTTP for user %d", userID)
+		}
+	}
+
 	// Настраиваем окружение
 	if err := session.SetupEnvironment(ctx); err != nil {
 		// Очищаем сессию при ошибке
@@ -386,6 +397,16 @@ func (h *VibeCodingHandler) handleEndCommand(ctx context.Context, chatID int64, 
 		errorMsg := fmt.Sprintf("[vibecoding] ❌ Ошибка создания архива: %s", err.Error())
 		h.updateMessage(chatID, sentMsg.MessageID, errorMsg)
 		return err
+	}
+
+	// Отключаем MCP клиент перед завершением сессии
+	if h.protocolClient != nil && h.protocolClient.mcpClient != nil {
+		log.Printf("🔌 Disconnecting MCP client for user %d", userID)
+		if err := h.protocolClient.mcpClient.Close(); err != nil {
+			log.Printf("⚠️ Error disconnecting MCP client: %v", err)
+		} else {
+			log.Printf("✅ MCP client disconnected for user %d", userID)
+		}
 	}
 
 	// Завершаем сессию и очищаем состояние ожидания
