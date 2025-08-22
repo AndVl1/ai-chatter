@@ -551,24 +551,76 @@ GUIDELINES:
 
 // buildMCPUserPrompt создает пользовательский промпт для MCP работы
 func (c *VibeCodingLLMClient) buildMCPUserPrompt(request VibeCodingRequest, userID int64) string {
-	return fmt.Sprintf(`AUTONOMOUS WORK REQUEST:
+	prompt := fmt.Sprintf(`AUTONOMOUS WORK REQUEST:
 User ID: %d
 Project: %s (%s)
 Task: %s
 
-Please work autonomously to complete this task using the available MCP tools. 
+`, userID, request.Context.ProjectName, request.Context.Language, request.Query)
+
+	// Добавляем сжатый контекст проекта если передан через опции
+	if contextInterface, exists := request.Options["project_context"]; exists {
+		if context, ok := contextInterface.(*ProjectContext); ok && context != nil {
+			prompt += "PROJECT CONTEXT (COMPRESSED):\n"
+			prompt += fmt.Sprintf("Language: %s | Total files: %d\n", context.Language, context.TotalFiles)
+
+			if context.Description != "" {
+				prompt += fmt.Sprintf("Description: %s\n", context.Description)
+			}
+
+			// Показываем ключевые файлы
+			for i, file := range context.Files {
+				if i >= 8 { // Ограничиваем для избежания переполнения контекста
+					prompt += fmt.Sprintf("... and %d more files (use vibe_list_files to see all)\n", len(context.Files)-8)
+					break
+				}
+
+				prompt += fmt.Sprintf("\n%s (%s):\n", file.Path, file.Type)
+				if file.Summary != "" {
+					prompt += fmt.Sprintf("  Summary: %s\n", file.Summary)
+				}
+
+				// Ключевые функции и структуры
+				if len(file.Functions) > 0 {
+					funcNames := make([]string, 0, len(file.Functions))
+					for j, fn := range file.Functions {
+						if j >= 3 { // Показываем только первые 3
+							funcNames = append(funcNames, "...")
+							break
+						}
+						funcNames = append(funcNames, fn.Name)
+					}
+					prompt += fmt.Sprintf("  Functions: %s\n", strings.Join(funcNames, ", "))
+				}
+
+				if len(file.Structs) > 0 {
+					structNames := make([]string, 0, len(file.Structs))
+					for j, st := range file.Structs {
+						if j >= 3 {
+							structNames = append(structNames, "...")
+							break
+						}
+						structNames = append(structNames, st.Name)
+					}
+					prompt += fmt.Sprintf("  Structs: %s\n", strings.Join(structNames, ", "))
+				}
+			}
+
+			prompt += "\nIMPORTANT: This is only a summary. Use vibe_read_file to get full file content when needed.\n\n"
+		}
+	}
+
+	prompt += `Please work autonomously to complete this task using the available MCP tools. 
 Start by assessing the current project state and then proceed with the implementation.
 
 Remember to:
-1. Understand the existing codebase first
+1. Understand the existing codebase first (use vibe_read_file for full content)
 2. Implement changes incrementally
 3. Test and validate your work
 4. Fix any issues you encounter
-5. Provide a summary when complete`,
-		userID,
-		request.Context.ProjectName,
-		request.Context.Language,
-		request.Query)
+5. Provide a summary when complete`
+
+	return prompt
 }
 
 // processMCPStep обрабатывает один шаг автономной работы

@@ -2,22 +2,23 @@
 
 ## Overview
 
-VibeCoding Mode is an interactive development session that allows users to upload code archives, get real-time analysis, generate tests, and iteratively improve their projects with AI assistance. It provides a comprehensive development environment with automated test fixing, environment setup, project visualization, and now includes a full MCP (Model Context Protocol) server architecture with external web interface.
+VibeCoding Mode is an interactive development session that allows users to upload code archives, get real-time analysis, generate tests, and iteratively improve their projects with AI assistance. It provides a comprehensive development environment with automated test fixing, environment setup, project visualization, **compressed project context for AI**, and now includes a full MCP (Model Context Protocol) server architecture with external web interface.
 
 ## Table of Contents
 
 1. [Architecture](#architecture)
 2. [Core Components](#core-components)
-3. [MCP Server Architecture](#mcp-server-architecture)
-4. [External Web Interface](#external-web-interface)
-5. [Session Management](#session-management)
-6. [LLM Integration](#llm-integration)
-7. [Test System](#test-system)
-8. [Web Interface](#web-interface)
-9. [Usage Guide](#usage-guide)
-10. [API Reference](#api-reference)
-11. [Configuration](#configuration)
-12. [Troubleshooting](#troubleshooting)
+3. [Compressed Project Context](#compressed-project-context)
+4. [MCP Server Architecture](#mcp-server-architecture)
+5. [External Web Interface](#external-web-interface)
+6. [Session Management](#session-management)
+7. [LLM Integration](#llm-integration)
+8. [Test System](#test-system)
+9. [Web Interface](#web-interface)
+10. [Usage Guide](#usage-guide)
+11. [API Reference](#api-reference)
+12. [Configuration](#configuration)
+13. [Troubleshooting](#troubleshooting)
 
 ## Architecture
 
@@ -69,6 +70,291 @@ VibeCoding mode is built with a modular architecture consisting of several key c
 - **Multi-Language Support**: Python, JavaScript/TypeScript, Go, Java, and more
 - **Container Orchestration**: Docker Compose setup for scalable deployment
 - **LLM-Based Architecture**: Removed all hardcoded language patterns in favor of unified LLM approach
+
+## Compressed Project Context
+
+VibeCoding automatically generates a compressed, AI-optimized representation of your project that enables efficient understanding and navigation by Large Language Models. The system now uses **LLM-based context generation** with parallel execution for optimal performance.
+
+### LLM Context Generation Architecture
+
+VibeCoding has moved from AST-based analysis to a sophisticated LLM-powered context generation system that provides:
+
+#### **Parallel Generation (`llm_context_generator.go`)**
+- Context generation runs **parallel with environment setup** for optimal performance
+- Uses preloaded file lists to avoid I/O blocking
+- Token budget management (5000 tokens by default, configurable)
+- Incremental updates for modified files
+- Universal JSON storage format
+
+```go
+type ProjectContextLLM struct {
+    ProjectName  string                    `json:"project_name"`
+    Language     string                    `json:"language"`
+    GeneratedAt  time.Time                 `json:"generated_at"`
+    TotalFiles   int                       `json:"total_files"`
+    Description  string                    `json:"description"`
+    Dependencies []string                  `json:"dependencies,omitempty"`
+    Files        map[string]LLMFileContext `json:"files"`
+    Structure    ProjectStructure          `json:"structure"`
+    TokensUsed   int                       `json:"tokens_used"`
+    TokensLimit  int                       `json:"tokens_limit"`
+}
+
+type LLMFileContext struct {
+    Path         string    `json:"path"`
+    Type         string    `json:"type"`
+    Size         int       `json:"size"`
+    LastModified time.Time `json:"last_modified"`
+    Summary      string    `json:"summary"`      // LLM-generated description
+    KeyElements  []string  `json:"key_elements"` // Main functions/classes/interfaces
+    Purpose      string    `json:"purpose"`      // File's role in project
+    Dependencies []string  `json:"dependencies"` // File dependencies
+    TokensUsed   int       `json:"tokens_used"`  // Tokens used for this description
+    NeedsUpdate  bool      `json:"needs_update"` // Update flag
+}
+```
+
+### Key Features
+
+#### 1. **LLM-Powered Analysis**
+- **Language Agnostic**: Works with any programming language
+- **Context-Aware**: Understands project architecture and relationships
+- **Smart Summarization**: Focuses on key elements rather than raw syntax
+- **On-Demand Content**: Large files analyzed via MCP tools when needed
+
+#### 2. **Token Budget Management**
+- **Configurable Limits**: Default 5000 tokens, adjustable per project
+- **Smart Allocation**: Budget distributed based on file importance
+- **Priority Sorting**: Critical files (main.go, API endpoints) get priority
+- **Efficient Usage**: Only stores essential information within budget
+
+#### 3. **Parallel Execution Optimization**
+- **Non-Blocking**: Context generation runs during environment setup
+- **Preloaded Files**: Uses existing file lists to avoid redundant scanning
+- **Async Processing**: Background generation with progress logging
+- **Error Resilient**: Graceful fallbacks for individual file failures
+
+#### 4. **Universal Storage Format**
+- **JSON Structure**: Language-independent, consistent format
+- **Cross-Platform**: Same format across different project types  
+- **Version Tracking**: Metadata includes generator version and timestamps
+- **MCP Integration**: Includes usage instructions for LLM tools
+
+### Dual Format Generation
+
+Each VibeCoding session automatically creates **two context files** in the project root:
+
+#### 1. **`vibecoding-context.json`** - Universal Format
+Language-independent JSON structure for programmatic access:
+
+```json
+{
+  "metadata": {
+    "project_name": "ai-chatter",
+    "language": "go", 
+    "generator": "LLM",
+    "version": "1.0",
+    "generated_at": "2025-08-21T15:04:05Z",
+    "total_files": 15,
+    "tokens_used": 3420,
+    "tokens_limit": 5000
+  },
+  "description": "Go-based Telegram bot with VibeCoding mode",
+  "dependencies": ["github.com/go-telegram-bot-api/telegram-bot-api", "..."],
+  "structure": {
+    "directories": [
+      {"path": "cmd", "file_count": 2, "purpose": "Application entry points"},
+      {"path": "internal", "file_count": 8, "purpose": "Internal application code"}
+    ],
+    "file_types": [
+      {"extension": ".go", "count": 12, "language": "Go"},
+      {"extension": ".md", "count": 3, "language": "Markdown"}
+    ]
+  },
+  "files": {
+    "cmd/main.go": {
+      "summary": "Main application entry point with Telegram bot setup",
+      "key_elements": ["main", "setupBot", "Config"],
+      "purpose": "Application bootstrap and configuration",
+      "dependencies": ["internal/telegram", "internal/vibecoding"],
+      "tokens_used": 45
+    }
+  },
+  "usage_instructions": {
+    "mcp_tools": [
+      "vibe_read_file - Get full file content",
+      "vibe_write_file - Create or modify files",
+      "vibe_execute_command - Run commands"
+    ]
+  }
+}
+```
+
+#### 2. **`vibecoding-context.md`** - Human-Readable Format
+Markdown document for easy browsing and understanding:
+
+```markdown
+# LLM-Generated Project Context
+
+**Generated:** 2025-08-21 15:04:05
+**Project:** ai-chatter
+**Language:** go
+**Total Files:** 15
+**Tokens Used:** 3420 / 5000
+
+**Description:** Go-based Telegram bot with VibeCoding mode
+
+## Project Structure
+- **cmd** (2 files) - Application entry points
+- **internal** (8 files) - Internal application code
+- **pkg** (5 files) - Library code
+
+## File Descriptions (LLM-Generated)
+
+### cmd/main.go
+**Type:** go | **Size:** 1250 bytes | **Tokens Used:** 45
+
+**Summary:** Main application entry point with Telegram bot setup
+**Purpose:** Application bootstrap and configuration
+**Key Elements:** main, setupBot, Config
+**Dependencies:** internal/telegram, internal/vibecoding
+
+---
+
+## Usage Instructions for LLM
+This is an LLM-generated compressed project context with token budgeting.
+Always use MCP tools to access actual file contents for implementation details.
+```
+
+### Unified Architecture & Performance
+
+#### **Single Request Optimization**
+The new architecture combines project analysis and context generation in one LLM request:
+
+```
+                    ┌─────────────────┐
+                    │ Single LLM      │
+                    │ Request         │
+                    │                 │
+                    │ 📊 Analysis +   │
+                    │ 🧠 Context      │
+                    └─────┬───────────┘
+                          │
+                    ┌─────▼───────────┐
+                    │ Combined        │
+                    │ Response        │
+                    │                 │
+                    │ • Docker setup  │
+                    │ • Dependencies  │
+                    │ • Project desc  │
+                    │ • File contexts │
+                    └─────┬───────────┘
+                          │
+              ┌───────────┼───────────┐
+              ▼                       ▼
+      ┌──────────────┐        ┌──────────────┐
+      │ Environment  │        │ Context      │
+      │ Setup        │        │ Generation   │
+      │              │        │              │
+      │ • Container  │        │ • File desc  │
+      │ • Files      │        │ • Structure  │
+      │ • Deps       │        │ • JSON/MD    │
+      └──────────────┘        └──────────────┘
+```
+
+#### **Performance Benefits**
+- **Single LLM call** instead of multiple requests
+- **Consistent analysis** - same context used for setup and documentation
+- **Reduced latency** - no waiting for parallel processes
+- **Simplified error handling** - single point of failure
+- **Better token efficiency** - unified context understanding
+
+#### **Unified Analysis Features**
+- **Environment Setup**: Docker image, install commands, validation commands
+- **Project Context**: File descriptions, structure analysis, dependencies
+- **Consistent Language Detection**: Same language analysis for both purposes
+- **Smart Content Limitation**: Includes key file contents (up to 1000 chars per file)
+
+#### **Combined Request Structure**
+```json
+{
+  "analysis": {
+    "language": "Go",
+    "docker_image": "golang:1.22",
+    "install_commands": ["go mod download"],
+    "validation_commands": ["go build ./..."],
+    "test_commands": ["go test ./..."],
+    "working_dir": "/workspace",
+    "reasoning": "Go project with modules"
+  },
+  "context": {
+    "description": "Go-based Telegram bot with VibeCoding mode",
+    "files": {
+      "main.go": {
+        "summary": "Application entry point",
+        "key_elements": ["main", "setupBot"],
+        "purpose": "Bootstrap and configuration"
+      }
+    }
+  }
+}
+```
+
+### LLM Integration
+
+#### Autonomous Work Enhancement
+The compressed context is automatically included in LLM prompts for autonomous work:
+
+```
+PROJECT CONTEXT (COMPRESSED):
+Language: go | Total files: 15
+
+cmd/main.go (go):
+  Summary: Application entry point with server setup
+  Functions: main, setupServer
+  
+internal/api/handler.go (go):
+  Summary: HTTP request handlers and routing
+  Functions: NewHandler, HandleRequest, HandleAuth
+  Structs: Handler, Config
+```
+
+#### Context-Aware Operations
+- LLM understands project structure before making changes
+- Smart file navigation based on architecture
+- Informed decisions about where to place new code
+- Efficient use of MCP tools for file access
+
+### Commands
+
+#### `/vibecoding_context`
+Manually refresh the project context:
+```
+[vibecoding] ✅ Контекст проекта обновлен
+
+📊 Статистика:
+Всего файлов: 15
+Функций: 42
+Структур: 8
+Обновлен: 15:04:05
+
+📋 Полный контекст доступен в файле PROJECT_CONTEXT.md
+```
+
+#### Context in `/vibecoding_info`
+Session info now includes context statistics:
+```
+📋 Контекст проекта: доступен
+Сгенерирован: 15:04:05
+Функций: 42, структур: 8
+Полный контекст: PROJECT_CONTEXT.md
+```
+
+### Dynamic Updates
+- Context automatically refreshes when files are modified
+- Background regeneration prevents blocking operations  
+- Timestamp tracking for context freshness
+- Incremental updates for performance
 
 ## MCP Server Architecture
 
@@ -245,18 +531,21 @@ type VibeCodingSession struct {
     TestCommand    string                             // Test execution command
     Docker         *DockerAdapter                     // Docker interface
     LLMClient      llm.Client                         // LLM client
+    Context        *ProjectContext                    // Compressed project context
 }
 ```
 
 **Key Methods:**
-- `SetupEnvironment(ctx)`: Configures Docker environment with up to 3 retry attempts and auto-starts MCP server
+- `SetupEnvironment(ctx)`: Configures Docker environment with up to 3 retry attempts, auto-starts MCP server, and generates project context
 - `ExecuteCommand(ctx, command)`: Runs commands in the container
 - `ListFiles(ctx)`: Returns list of all files in session
 - `ReadFile(ctx, filename)`: Reads content of a specific file
-- `WriteFile(ctx, filename, content, generated)`: Writes file to session and container
+- `WriteFile(ctx, filename, content, generated)`: Writes file to session and container, auto-refreshes context
 - `ValidateCode(ctx, code, filename)`: Validates code using container environment
 - `AddGeneratedFile(filename, content)`: Adds AI-generated files
 - `GetAllFiles()`: Returns combined original and generated files
+- `GetProjectContext()`: Returns compressed project context
+- `RefreshProjectContext()`: Manually regenerates project context
 - `CreatedAt()`: Returns session creation time for MCP compatibility
 - `Cleanup()`: Releases resources when session ends
 
@@ -284,10 +573,11 @@ type SessionManager struct {
 Handles Telegram commands and user interactions.
 
 **Supported Commands:**
-- `/vibecoding_info`: Session information
+- `/vibecoding_info`: Session information with context statistics
+- `/vibecoding_context`: Refresh project context manually
 - `/vibecoding_test`: Run tests with auto-fixing
 - `/vibecoding_generate_tests`: Generate new tests
-- `/vibecoding_auto`: Autonomous AI work
+- `/vibecoding_auto`: Autonomous AI work with compressed context
 - `/vibecoding_end`: End session and export results
 
 ### 4. Docker Integration (`docker_adapter.go`)

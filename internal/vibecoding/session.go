@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +29,7 @@ type VibeCodingSession struct {
 	TestCommand    string                             // Команда для запуска тестов
 	Docker         *DockerAdapter                     // Docker адаптер
 	LLMClient      llm.Client                         // LLM клиент для анализа ошибок
+	Context        *ProjectContextLLM                 // Сжатый контекст проекта для LLM (LLM-generated)
 	mutex          sync.RWMutex                       // Мьютекс для безопасности потоков
 }
 
@@ -166,7 +169,7 @@ func (sm *SessionManager) GetActiveSessions() int {
 	return len(sm.sessions)
 }
 
-// SetupEnvironment настраивает окружение для проекта (до 3 попыток)
+// SetupEnvironment настраивает окружение для проекта с единым LLM запросом для анализа и контекста
 func (s *VibeCodingSession) SetupEnvironment(ctx context.Context) error {
 	s.mutex.Lock()
 	defer s.mutex.Unlock()
@@ -186,9 +189,9 @@ func (s *VibeCodingSession) SetupEnvironment(ctx context.Context) error {
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
 		log.Printf("🔥 Environment setup attempt %d/%d", attempt, maxAttempts)
 
-		// 1. Анализируем проект
-		if err := s.analyzeProject(ctx); err != nil {
-			lastError = fmt.Errorf("project analysis failed: %w", err)
+		// 1. Выполняем единый анализ проекта и генерацию контекста
+		if err := s.analyzeProjectAndGenerateContext(ctx); err != nil {
+			lastError = fmt.Errorf("project analysis and context generation failed: %w", err)
 			log.Printf("❌ Attempt %d failed: %v", attempt, lastError)
 			continue
 		}
@@ -237,6 +240,17 @@ func (s *VibeCodingSession) SetupEnvironment(ctx context.Context) error {
 		// 5. Генерируем команду для тестов
 		s.TestCommand = s.generateTestCommand()
 
+		// 6. Сохраняем созданный контекст в файлы
+		if s.Context != nil {
+			if err := s.saveContextFiles(s.Context); err != nil {
+				log.Printf("⚠️ Failed to save context files: %v", err)
+				// Не прерываем настройку, файлы контекста не критичны
+			} else {
+				log.Printf("✅ Generated compressed project context with %d files, %d/%d tokens used",
+					len(s.Context.Files), s.Context.TokensUsed, s.Context.TokensLimit)
+			}
+		}
+
 		log.Printf("✅ Environment setup successful on attempt %d", attempt)
 		return nil
 	}
@@ -244,7 +258,244 @@ func (s *VibeCodingSession) SetupEnvironment(ctx context.Context) error {
 	return fmt.Errorf("environment setup failed after %d attempts: %w", maxAttempts, lastError)
 }
 
-// analyzeProject анализирует проект используя LLM (unified approach from validator.go)
+// analyzeProjectAndGenerateContext выполняет анализ проекта и генерацию контекста в одном запросе
+func (s *VibeCodingSession) analyzeProjectAndGenerateContext(ctx context.Context) error {
+	log.Printf("📊🧠 Analyzing VibeCoding project and generating context with %d files using LLM", len(s.Files))
+
+	if s.LLMClient == nil {
+		return fmt.Errorf("LLM client not available")
+	}
+
+	// Создаем системный промпт для объединенного анализа
+	systemPrompt := `You are an expert DevOps engineer and code analyst. Your task is to:
+
+1. ANALYZE the project for environment setup (Docker image, dependencies, commands)
+2. GENERATE a compressed project context for AI understanding
+
+Provide a JSON response with this exact structure:
+{
+  "analysis": {
+    "language": "primary programming language",
+    "framework": "detected framework (if any)",
+    "docker_image": "appropriate docker image:tag",
+    "install_commands": ["list", "of", "install", "commands"],
+    "validation_commands": ["list", "of", "validation", "commands"],
+    "test_commands": ["list", "of", "test", "commands"],
+    "working_dir": "working directory (usually /workspace)",
+    "project_type": "type description",
+    "dependencies": ["key", "dependencies"],
+    "reasoning": "brief explanation of choices"
+  },
+  "context": {
+    "description": "Brief project description (max 100 chars)",
+    "language": "same as analysis.language",
+    "structure": {
+      "directories": [
+        {"path": "dirname", "purpose": "directory purpose", "file_count": 0}
+      ],
+      "file_types": [
+        {"extension": ".ext", "language": "Language", "count": 0}
+      ]
+    },
+    "dependencies": ["extracted", "dependencies"],
+    "files": {
+      "path/to/file.ext": {
+        "summary": "Brief file description",
+        "key_elements": ["main", "functions", "classes"],
+        "purpose": "File's role in project",
+        "dependencies": ["other", "files"],
+        "type": "file_type"
+      }
+    }
+  }
+}
+
+IMPORTANT:
+- Be specific about Docker images (use exact tags like golang:1.22, python:3.11-slim)
+- Include complete install commands for the detected language/framework
+- Generate meaningful file summaries focusing on architecture and key components
+- Keep file summaries concise but informative
+- Focus on the most important files first
+- Extract real dependencies from package files (go.mod, package.json, requirements.txt)
+`
+
+	// Подготавливаем информацию о файлах проекта
+	fileList := make([]string, 0, len(s.Files))
+	fileContents := make(map[string]string)
+
+	for filename, content := range s.Files {
+		fileList = append(fileList, filename)
+		// Ограничиваем размер содержимого для включения в промпт
+		if len(content) > 1000 {
+			fileContents[filename] = content[:1000] + "... (truncated)"
+		} else {
+			fileContents[filename] = content
+		}
+	}
+
+	// Создаем пользовательский промпт
+	userPrompt := fmt.Sprintf(`PROJECT: %s
+TOTAL FILES: %d
+
+FILE LIST:
+%s
+
+KEY FILE CONTENTS:
+%s
+
+Please analyze this project and generate both environment setup configuration and compressed context.
+Focus on:
+1. Detecting the correct language/framework and appropriate Docker setup
+2. Extracting key architectural components and file purposes
+3. Understanding dependencies and project structure
+4. Creating concise but informative file summaries`,
+		s.ProjectName,
+		len(s.Files),
+		strings.Join(fileList, "\n"),
+		s.formatFileContentsForPrompt(fileContents))
+
+	messages := []llm.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+
+	log.Printf("🧠 Requesting combined analysis and context generation from LLM...")
+	response, err := s.LLMClient.Generate(ctx, messages)
+	if err != nil {
+		return fmt.Errorf("failed to get combined analysis: %w", err)
+	}
+
+	// Парсим объединенный ответ
+	var combinedResult struct {
+		Analysis struct {
+			Language           string   `json:"language"`
+			Framework          string   `json:"framework"`
+			DockerImage        string   `json:"docker_image"`
+			InstallCommands    []string `json:"install_commands"`
+			ValidationCommands []string `json:"validation_commands"`
+			TestCommands       []string `json:"test_commands"`
+			WorkingDir         string   `json:"working_dir"`
+			ProjectType        string   `json:"project_type"`
+			Dependencies       []string `json:"dependencies"`
+			Reasoning          string   `json:"reasoning"`
+		} `json:"analysis"`
+		Context struct {
+			Description string `json:"description"`
+			Language    string `json:"language"`
+			Structure   struct {
+				Directories []struct {
+					Path      string `json:"path"`
+					Purpose   string `json:"purpose"`
+					FileCount int    `json:"file_count"`
+				} `json:"directories"`
+				FileTypes []struct {
+					Extension string `json:"extension"`
+					Language  string `json:"language"`
+					Count     int    `json:"count"`
+				} `json:"file_types"`
+			} `json:"structure"`
+			Dependencies []string `json:"dependencies"`
+			Files        map[string]struct {
+				Summary      string   `json:"summary"`
+				KeyElements  []string `json:"key_elements"`
+				Purpose      string   `json:"purpose"`
+				Dependencies []string `json:"dependencies"`
+				Type         string   `json:"type"`
+			} `json:"files"`
+		} `json:"context"`
+	}
+
+	if err := json.Unmarshal([]byte(response.Content), &combinedResult); err != nil {
+		log.Printf("⚠️ Failed to parse combined analysis response: %v", err)
+		log.Printf("Raw response: %s", response.Content[:min(500, len(response.Content))])
+		return fmt.Errorf("failed to parse combined analysis response: %w", err)
+	}
+
+	// Устанавливаем результаты анализа проекта
+	s.Analysis = &codevalidation.CodeAnalysisResult{
+		Language:        combinedResult.Analysis.Language,
+		Framework:       combinedResult.Analysis.Framework,
+		DockerImage:     combinedResult.Analysis.DockerImage,
+		InstallCommands: combinedResult.Analysis.InstallCommands,
+		Commands:        combinedResult.Analysis.ValidationCommands,
+		TestCommands:    combinedResult.Analysis.TestCommands,
+		WorkingDir:      combinedResult.Analysis.WorkingDir,
+		ProjectType:     combinedResult.Analysis.ProjectType,
+		Dependencies:    combinedResult.Analysis.Dependencies,
+		Reasoning:       combinedResult.Analysis.Reasoning,
+	}
+
+	// Создаем контекст проекта из ответа LLM
+	s.Context = &ProjectContextLLM{
+		ProjectName:  s.ProjectName,
+		Language:     combinedResult.Context.Language,
+		GeneratedAt:  time.Now(),
+		TotalFiles:   len(s.Files),
+		Description:  combinedResult.Context.Description,
+		Dependencies: combinedResult.Context.Dependencies,
+		Files:        make(map[string]LLMFileContext),
+		TokensLimit:  5000,
+		Structure: ProjectStructure{
+			Directories: make([]Directory, 0),
+			FileTypes:   make([]FileType, 0),
+		},
+	}
+
+	// Конвертируем структуру каталогов
+	for _, dir := range combinedResult.Context.Structure.Directories {
+		s.Context.Structure.Directories = append(s.Context.Structure.Directories, Directory{
+			Path:      dir.Path,
+			Purpose:   dir.Purpose,
+			FileCount: dir.FileCount,
+		})
+	}
+
+	// Конвертируем типы файлов
+	for _, ft := range combinedResult.Context.Structure.FileTypes {
+		s.Context.Structure.FileTypes = append(s.Context.Structure.FileTypes, FileType{
+			Extension: ft.Extension,
+			Language:  ft.Language,
+			Count:     ft.Count,
+		})
+	}
+
+	// Конвертируем информацию о файлах
+	tokenEstimator := &TokenEstimator{}
+	totalTokens := 0
+	for filePath, fileInfo := range combinedResult.Context.Files {
+		fileContext := LLMFileContext{
+			Path:         filePath,
+			Type:         fileInfo.Type,
+			Size:         len(s.Files[filePath]),
+			LastModified: time.Now(),
+			Summary:      fileInfo.Summary,
+			KeyElements:  fileInfo.KeyElements,
+			Purpose:      fileInfo.Purpose,
+			Dependencies: fileInfo.Dependencies,
+			NeedsUpdate:  false,
+		}
+
+		// Оцениваем токены
+		fileContext.TokensUsed = tokenEstimator.EstimateTokens(
+			fileContext.Summary +
+				strings.Join(fileContext.KeyElements, " ") +
+				fileContext.Purpose)
+		totalTokens += fileContext.TokensUsed
+
+		s.Context.Files[filePath] = fileContext
+	}
+	s.Context.TokensUsed = totalTokens
+
+	log.Printf("🔥 Combined analysis complete: %s (%s)", s.Analysis.Language, s.Analysis.DockerImage)
+	log.Printf("📦 Install commands: %v", s.Analysis.InstallCommands)
+	log.Printf("⚡ Validation commands: %v", s.Analysis.Commands)
+	log.Printf("🧪 Test commands: %v", s.Analysis.TestCommands)
+	log.Printf("🧠 Generated context: %d files, %d tokens, '%s'", len(s.Context.Files), s.Context.TokensUsed, s.Context.Description)
+
+	return nil
+}
+
+// analyzeProject анализирует проект используя LLM (unified approach from validator.go) - DEPRECATED
 func (s *VibeCodingSession) analyzeProject(ctx context.Context) error {
 	log.Printf("📊 Analyzing VibeCoding project with %d files using LLM", len(s.Files))
 
@@ -262,6 +513,27 @@ func (s *VibeCodingSession) analyzeProject(ctx context.Context) error {
 	log.Printf("⚡ Validation commands: %v", s.Analysis.Commands)
 
 	return nil
+}
+
+// formatFileContentsForPrompt форматирует содержимое файлов для включения в промпт
+func (s *VibeCodingSession) formatFileContentsForPrompt(fileContents map[string]string) string {
+	var result strings.Builder
+	count := 0
+	maxFiles := 10 // Ограничиваем количество файлов в промпте
+
+	for filename, content := range fileContents {
+		if count >= maxFiles {
+			result.WriteString("... (and more files)\n")
+			break
+		}
+
+		result.WriteString(fmt.Sprintf("\n=== %s ===\n", filename))
+		result.WriteString(content)
+		result.WriteString("\n")
+		count++
+	}
+
+	return result.String()
 }
 
 // Note: Hardcoded language detection methods removed - now using unified LLM-based approach from validator.go
@@ -413,6 +685,64 @@ func (s *VibeCodingSession) WriteFile(ctx context.Context, filename, content str
 		}
 	}
 
+	// Обновляем контекст проекта инкриментально (для LLM контекста)
+	if filename != "PROJECT_CONTEXT.md" && s.Context != nil && s.LLMClient != nil {
+		go func() {
+			// Используем инкриментальное обновление для LLM контекста
+			generator := NewLLMContextGenerator(s.LLMClient, 5000)
+			ctx := context.Background()
+			if err := generator.UpdateFileContext(ctx, s.Context, filename, content); err != nil {
+				log.Printf("⚠️ Failed to update LLM context for file %s: %v", filename, err)
+				// Fallback: полное обновление контекста
+				if err := s.RefreshProjectContext(); err != nil {
+					log.Printf("⚠️ Failed to refresh project context after file write: %v", err)
+				}
+			} else {
+				log.Printf("✅ Updated LLM context for file: %s", filename)
+				// Обновляем PROJECT_CONTEXT.md с новым контекстом
+				contextMarkdown := s.generateContextMarkdown()
+				s.GeneratedFiles["PROJECT_CONTEXT.md"] = contextMarkdown
+			}
+		}()
+	}
+
+	return nil
+}
+
+// RemoveFile удаляет файл из сессии и обновляет контекст
+func (s *VibeCodingSession) RemoveFile(ctx context.Context, filename string) error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	// Удаляем из обычных и сгенерированных файлов
+	deleted := false
+	if _, exists := s.Files[filename]; exists {
+		delete(s.Files, filename)
+		deleted = true
+	}
+	if _, exists := s.GeneratedFiles[filename]; exists {
+		delete(s.GeneratedFiles, filename)
+		deleted = true
+	}
+
+	if !deleted {
+		return fmt.Errorf("file not found: %s", filename)
+	}
+
+	// Обновляем контекст (удаляем из LLM контекста)
+	if filename != "PROJECT_CONTEXT.md" && s.Context != nil && s.LLMClient != nil {
+		go func() {
+			generator := NewLLMContextGenerator(s.LLMClient, 5000)
+			generator.RemoveFileContext(s.Context, filename)
+			log.Printf("✅ Removed file from LLM context: %s", filename)
+
+			// Обновляем PROJECT_CONTEXT.md
+			contextMarkdown := s.generateContextMarkdown()
+			s.GeneratedFiles["PROJECT_CONTEXT.md"] = contextMarkdown
+		}()
+	}
+
+	log.Printf("🔥 Removed file from session: %s", filename)
 	return nil
 }
 
@@ -450,7 +780,7 @@ func (s *VibeCodingSession) GetSessionInfo() map[string]interface{} {
 	s.mutex.RLock()
 	defer s.mutex.RUnlock()
 
-	return map[string]interface{}{
+	info := map[string]interface{}{
 		"project_name":    s.ProjectName,
 		"language":        s.Analysis.Language,
 		"start_time":      s.StartTime,
@@ -459,6 +789,20 @@ func (s *VibeCodingSession) GetSessionInfo() map[string]interface{} {
 		"test_command":    s.TestCommand,
 		"container_id":    s.ContainerID,
 	}
+
+	// Добавляем информацию о контексте если доступен
+	if s.Context != nil {
+		info["context_available"] = true
+		info["context_generated_at"] = s.Context.GeneratedAt
+		info["context_total_files"] = s.Context.TotalFiles
+		info["context_tokens_used"] = s.Context.TokensUsed
+		info["context_tokens_limit"] = s.Context.TokensLimit
+		info["context_files_count"] = len(s.Context.Files)
+	} else {
+		info["context_available"] = false
+	}
+
+	return info
 }
 
 // analyzeAndFixError анализирует ошибку и предлагает исправления конфигурации
@@ -757,4 +1101,307 @@ func (s *VibeCodingSession) startMCPServerInContainer(ctx context.Context) {
 	}
 
 	log.Printf("✅ VibeCoding MCP server started in container %s", s.ContainerID)
+}
+
+// generateProjectContext генерирует сжатый контекст проекта с помощью LLM (синхронно)
+func (s *VibeCodingSession) generateProjectContext() error {
+	log.Printf("📋 Generating LLM-based compressed project context...")
+
+	// Используем LLM-генератор контекста с лимитом токенов (5000 по умолчанию)
+	generator := NewLLMContextGenerator(s.LLMClient, 5000)
+
+	// Получаем все файлы (исходные + сгенерированные)
+	allFiles := s.GetAllFiles()
+
+	ctx := context.Background()
+	context, err := generator.GenerateContext(ctx, s.ProjectName, allFiles)
+	if err != nil {
+		return fmt.Errorf("failed to generate LLM context: %w", err)
+	}
+
+	s.Context = context
+
+	// Создаем JSON и Markdown файлы контекста
+	if err := s.saveContextFiles(context); err != nil {
+		log.Printf("⚠️ Failed to save context files: %v", err)
+	}
+
+	log.Printf("✅ Generated LLM project context: %d files, %d/%d tokens used",
+		len(context.Files), context.TokensUsed, context.TokensLimit)
+
+	return nil
+}
+
+// generateContextMarkdown генерирует Markdown представление LLM-генерируемого контекста
+func (s *VibeCodingSession) generateContextMarkdown() string {
+	if s.Context == nil {
+		return "# Project Context\n\nContext not available."
+	}
+
+	var md strings.Builder
+
+	md.WriteString("# LLM-Generated Project Context\n\n")
+	md.WriteString(fmt.Sprintf("**Generated:** %s\n", s.Context.GeneratedAt.Format("2006-01-02 15:04:05")))
+	md.WriteString(fmt.Sprintf("**Project:** %s\n", s.Context.ProjectName))
+	md.WriteString(fmt.Sprintf("**Language:** %s\n", s.Context.Language))
+	md.WriteString(fmt.Sprintf("**Total Files:** %d\n", s.Context.TotalFiles))
+	md.WriteString(fmt.Sprintf("**Tokens Used:** %d / %d\n\n", s.Context.TokensUsed, s.Context.TokensLimit))
+
+	if s.Context.Description != "" {
+		md.WriteString(fmt.Sprintf("**Description:** %s\n\n", s.Context.Description))
+	}
+
+	// Dependencies
+	if len(s.Context.Dependencies) > 0 {
+		md.WriteString("## Dependencies\n\n")
+		for _, dep := range s.Context.Dependencies {
+			md.WriteString(fmt.Sprintf("- %s\n", dep))
+		}
+		md.WriteString("\n")
+	}
+
+	// Project structure
+	md.WriteString("## Project Structure\n\n")
+	for _, dir := range s.Context.Structure.Directories {
+		md.WriteString(fmt.Sprintf("- **%s** (%d files) - %s\n", dir.Path, dir.FileCount, dir.Purpose))
+	}
+	md.WriteString("\n")
+
+	// File types
+	if len(s.Context.Structure.FileTypes) > 0 {
+		md.WriteString("### File Types\n\n")
+		for _, ft := range s.Context.Structure.FileTypes {
+			md.WriteString(fmt.Sprintf("- %s: %d files (%s)\n", ft.Extension, ft.Count, ft.Language))
+		}
+		md.WriteString("\n")
+	}
+
+	// LLM-generated file descriptions
+	md.WriteString("## File Descriptions (LLM-Generated)\n\n")
+	for filePath, fileContext := range s.Context.Files {
+		md.WriteString(fmt.Sprintf("### %s\n", filePath))
+		md.WriteString(fmt.Sprintf("**Type:** %s | **Size:** %d bytes | **Last Modified:** %s\n",
+			fileContext.Type, fileContext.Size, fileContext.LastModified.Format("2006-01-02 15:04:05")))
+		md.WriteString(fmt.Sprintf("**Tokens Used:** %d\n\n", fileContext.TokensUsed))
+
+		if fileContext.Summary != "" {
+			md.WriteString(fmt.Sprintf("**Summary:** %s\n\n", fileContext.Summary))
+		}
+
+		if fileContext.Purpose != "" {
+			md.WriteString(fmt.Sprintf("**Purpose:** %s\n\n", fileContext.Purpose))
+		}
+
+		// Key elements
+		if len(fileContext.KeyElements) > 0 {
+			md.WriteString("**Key Elements:**\n")
+			for _, element := range fileContext.KeyElements {
+				md.WriteString(fmt.Sprintf("- %s\n", element))
+			}
+			md.WriteString("\n")
+		}
+
+		// Dependencies
+		if len(fileContext.Dependencies) > 0 {
+			md.WriteString("**File Dependencies:**\n")
+			for _, dep := range fileContext.Dependencies {
+				md.WriteString(fmt.Sprintf("- %s\n", dep))
+			}
+			md.WriteString("\n")
+		}
+
+		md.WriteString("---\n\n")
+	}
+
+	// Usage instructions
+	md.WriteString("## Usage Instructions for LLM\n\n")
+	md.WriteString("This is an LLM-generated compressed project context with token budgeting. To work with files:\n\n")
+	md.WriteString("1. **Read files**: Use `vibe_read_file` MCP tool to get full file content\n")
+	md.WriteString("2. **List files**: Use `vibe_list_files` MCP tool to get current file list\n")
+	md.WriteString("3. **Write files**: Use `vibe_write_file` MCP tool to create or modify files\n")
+	md.WriteString("4. **Execute commands**: Use `vibe_execute_command` MCP tool to run commands\n")
+	md.WriteString("5. **Run tests**: Use `vibe_run_tests` MCP tool to run project tests\n")
+	md.WriteString("6. **Validate code**: Use `vibe_validate_code` MCP tool to check syntax\n\n")
+
+	md.WriteString("**Important Notes:**\n")
+	md.WriteString("- This context is generated by an LLM and provides high-level descriptions\n")
+	md.WriteString("- Always use MCP tools to access actual file contents for implementation details\n")
+	md.WriteString("- Context is token-limited and may not include all files due to budget constraints\n")
+	md.WriteString("- For large files, LLM may request content through MCP tools on-demand\n")
+
+	return md.String()
+}
+
+// saveContextFiles сохраняет контекст в различных форматах (JSON, Markdown)
+func (s *VibeCodingSession) saveContextFiles(projectContext *ProjectContextLLM) error {
+	log.Printf("💾 Saving context files to project root...")
+
+	// 1. Сохраняем JSON контекст (универсальный формат)
+	jsonContent, err := s.generateContextJSON(projectContext)
+	if err != nil {
+		return fmt.Errorf("failed to generate JSON context: %w", err)
+	}
+
+	workingDir := "."
+	if s.Analysis != nil && s.Analysis.WorkingDir != "" {
+		workingDir = s.Analysis.WorkingDir
+	}
+
+	jsonPath := filepath.Join(workingDir, "vibecoding-context.json")
+	if err := s.writeFile(jsonPath, jsonContent); err != nil {
+		return fmt.Errorf("failed to write JSON context: %w", err)
+	}
+	log.Printf("💾 ✅ JSON context saved: %s", jsonPath)
+
+	// 2. Сохраняем Markdown контекст (человеко-читаемый)
+	mdContent := s.generateContextMarkdown()
+	mdPath := filepath.Join(workingDir, "vibecoding-context.md")
+	if err := s.writeFile(mdPath, mdContent); err != nil {
+		return fmt.Errorf("failed to write Markdown context: %w", err)
+	}
+	log.Printf("💾 ✅ Markdown context saved: %s", mdPath)
+
+	return nil
+}
+
+// generateContextJSON генерирует универсальную JSON структуру контекста
+func (s *VibeCodingSession) generateContextJSON(projectContext *ProjectContextLLM) (string, error) {
+	log.Printf("🔄 Generating universal JSON context...")
+
+	// Создаем универсальную структуру для JSON
+	universalContext := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"project_name": projectContext.ProjectName,
+			"language":     projectContext.Language,
+			"generator":    "LLM",
+			"version":      "1.0",
+			"generated_at": projectContext.GeneratedAt.Format(time.RFC3339),
+			"total_files":  projectContext.TotalFiles,
+			"tokens_used":  projectContext.TokensUsed,
+			"tokens_limit": projectContext.TokensLimit,
+		},
+		"description":  projectContext.Description,
+		"dependencies": projectContext.Dependencies,
+		"structure": map[string]interface{}{
+			"directories": projectContext.Structure.Directories,
+			"file_types":  projectContext.Structure.FileTypes,
+		},
+		"files": make(map[string]interface{}),
+		"usage_instructions": map[string]interface{}{
+			"description": "LLM-generated compressed project context with token budgeting",
+			"mcp_tools": []string{
+				"vibe_read_file - Get full file content",
+				"vibe_list_files - Get current file list",
+				"vibe_write_file - Create or modify files",
+				"vibe_execute_command - Run commands",
+				"vibe_run_tests - Run project tests",
+				"vibe_validate_code - Check syntax",
+			},
+			"notes": []string{
+				"Context is generated by LLM and provides high-level descriptions",
+				"Always use MCP tools to access actual file contents for implementation",
+				"Context is token-limited and may not include all files due to budget constraints",
+				"For large files, LLM may request content through MCP tools on-demand",
+			},
+		},
+	}
+
+	// Добавляем информацию о файлах
+	filesData := make(map[string]interface{})
+	for filePath, fileContext := range projectContext.Files {
+		filesData[filePath] = map[string]interface{}{
+			"path":          fileContext.Path,
+			"type":          fileContext.Type,
+			"size":          fileContext.Size,
+			"last_modified": fileContext.LastModified.Format(time.RFC3339),
+			"summary":       fileContext.Summary,
+			"key_elements":  fileContext.KeyElements,
+			"purpose":       fileContext.Purpose,
+			"dependencies":  fileContext.Dependencies,
+			"tokens_used":   fileContext.TokensUsed,
+			"needs_update":  fileContext.NeedsUpdate,
+		}
+	}
+	universalContext["files"] = filesData
+
+	// Сериализуем в JSON с красивым форматированием
+	jsonBytes, err := json.MarshalIndent(universalContext, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal JSON: %w", err)
+	}
+
+	log.Printf("🔄 ✅ JSON context generated: %d bytes", len(jsonBytes))
+	return string(jsonBytes), nil
+}
+
+// writeFile записывает содержимое в файл
+func (s *VibeCodingSession) writeFile(filePath, content string) error {
+	// Создаем директорию если не существует
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
+	// Записываем файл
+	if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("failed to write file %s: %w", filePath, err)
+	}
+
+	return nil
+}
+
+// GetProjectContext возвращает контекст проекта
+func (s *VibeCodingSession) GetProjectContext() *ProjectContextLLM {
+	s.mutex.RLock()
+	defer s.mutex.RUnlock()
+	return s.Context
+}
+
+// RefreshProjectContext обновляет контекст проекта (например, после изменений)
+func (s *VibeCodingSession) RefreshProjectContext() error {
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	log.Printf("🔄 Refreshing LLM project context...")
+
+	// Используем LLM-генератор контекста с лимитом токенов (5000 по умолчанию)
+	generator := NewLLMContextGenerator(s.LLMClient, 5000)
+	allFiles := s.GetAllFiles()
+
+	ctx := context.Background()
+	context, err := generator.GenerateContext(ctx, s.ProjectName, allFiles)
+	if err != nil {
+		return fmt.Errorf("failed to refresh LLM context: %w", err)
+	}
+
+	s.Context = context
+
+	// Обновляем PROJECT_CONTEXT.md
+	contextMarkdown := s.generateContextMarkdown()
+	s.AddGeneratedFile("PROJECT_CONTEXT.md", contextMarkdown)
+
+	log.Printf("✅ LLM project context refreshed: %d/%d tokens", context.TokensUsed, context.TokensLimit)
+	return nil
+}
+
+// countTotalKeyElements подсчитывает общее количество ключевых элементов в проекте (LLM контекст)
+func (s *VibeCodingSession) countTotalKeyElements() int {
+	if s.Context == nil {
+		return 0
+	}
+
+	total := 0
+	for _, file := range s.Context.Files {
+		total += len(file.KeyElements)
+	}
+	return total
+}
+
+// countTotalFiles подсчитывает общее количество файлов в LLM контексте
+func (s *VibeCodingSession) countTotalFiles() int {
+	if s.Context == nil {
+		return 0
+	}
+
+	return len(s.Context.Files)
 }

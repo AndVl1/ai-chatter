@@ -90,8 +90,8 @@ func TestSessionManager_GetSession(t *testing.T) {
 	}
 
 	// Get session
-	retrievedSession, exists := sm.GetSession(123)
-	if !exists {
+	retrievedSession := sm.GetSession(123)
+	if retrievedSession == nil {
 		t.Error("Session should exist")
 	}
 
@@ -100,8 +100,8 @@ func TestSessionManager_GetSession(t *testing.T) {
 	}
 
 	// Try to get non-existent session
-	_, exists = sm.GetSession(999)
-	if exists {
+	nonExistentSession := sm.GetSession(999)
+	if nonExistentSession != nil {
 		t.Error("Non-existent session should not exist")
 	}
 }

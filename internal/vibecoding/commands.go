@@ -148,6 +148,7 @@ func (h *VibeCodingHandler) HandleArchiveUpload(ctx context.Context, userID, cha
 
 Доступные команды:
 /vibecoding_info - информация о сессии
+/vibecoding_context - обновить контекст проекта
 /vibecoding_test - запустить тесты
 /vibecoding_generate_tests - сгенерировать тесты
 /vibecoding_auto - автономная работа с проектом
@@ -174,6 +175,8 @@ func (h *VibeCodingHandler) HandleVibeCodingCommand(ctx context.Context, userID,
 	switch command {
 	case "/vibecoding_info":
 		return h.handleInfoCommand(chatID, session)
+	case "/vibecoding_context":
+		return h.handleContextCommand(ctx, chatID, session)
 	case "/vibecoding_test":
 		return h.handleTestCommand(ctx, chatID, session)
 	case "/vibecoding_generate_tests":
@@ -237,7 +240,58 @@ func (h *VibeCodingHandler) handleInfoCommand(chatID int64, session *VibeCodingS
 		info["test_command"].(string),
 		info["container_id"].(string))
 
+	// Добавляем информацию о контексте
+	if contextAvailable, exists := info["context_available"].(bool); exists && contextAvailable {
+		infoMsg += fmt.Sprintf(`
+
+📋 Контекст проекта: доступен
+Сгенерирован: %s
+Функций: %d, структур: %d
+Полный контекст: PROJECT_CONTEXT.md`,
+			info["context_generated_at"].(time.Time).Format("15:04:05"),
+			info["context_functions"].(int),
+			info["context_structs"].(int))
+	} else {
+		infoMsg += "\n\n📋 Контекст проекта: не доступен"
+	}
+
 	return h.sendMessage(chatID, infoMsg)
+}
+
+// handleContextCommand обрабатывает команду обновления контекста проекта
+func (h *VibeCodingHandler) handleContextCommand(ctx context.Context, chatID int64, session *VibeCodingSession) error {
+	text := "[vibecoding] 📋 Обновление контекста проекта..."
+	msg := tgbotapi.NewMessage(chatID, h.formatter.EscapeText(text))
+	msg.ParseMode = h.formatter.ParseModeValue()
+	sentMsg, _ := h.sender.Send(msg)
+
+	// Обновляем контекст
+	if err := session.RefreshProjectContext(); err != nil {
+		errorMsg := fmt.Sprintf("[vibecoding] ❌ Ошибка обновления контекста: %s", err.Error())
+		h.updateMessage(chatID, sentMsg.MessageID, errorMsg)
+		return err
+	}
+
+	// Получаем обновленную информацию о LLM-контексте
+	info := session.GetSessionInfo()
+	successMsg := fmt.Sprintf(`[vibecoding] ✅ LLM-контекст проекта обновлен
+
+📊 Статистика:
+Всего файлов: %d
+Ключевых элементов: %d
+Токенов: %d / %d
+Обновлен: %s
+
+📋 Полный LLM-контекст доступен в файле PROJECT_CONTEXT.md
+Используйте MCP tools для получения файлов по требованию.`,
+		info["context_total_files"].(int),
+		info["context_files_count"].(int),
+		info["context_tokens_used"].(int),
+		info["context_tokens_limit"].(int),
+		info["context_generated_at"].(time.Time).Format("15:04:05"))
+
+	h.updateMessage(chatID, sentMsg.MessageID, successMsg)
+	return nil
 }
 
 // handleTestCommand обрабатывает команду запуска тестов с автоматическим исправлением при неудаче
@@ -462,6 +516,15 @@ func (h *VibeCodingHandler) HandleAutoWorkRequest(ctx context.Context, userID, c
 	sentMsg, _ := h.sender.Send(msg)
 
 	// Создаем запрос для автономной работы
+	options := map[string]interface{}{
+		"user_id": userID,
+	}
+
+	// Добавляем сжатый контекст проекта если доступен
+	if session.Context != nil {
+		options["project_context"] = session.Context
+	}
+
 	request := VibeCodingRequest{
 		Action: "autonomous_work",
 		Context: VibeCodingContext{
@@ -471,10 +534,8 @@ func (h *VibeCodingHandler) HandleAutoWorkRequest(ctx context.Context, userID, c
 			GeneratedFiles:  session.GeneratedFiles,
 			SessionDuration: time.Since(session.StartTime).Round(time.Second).String(),
 		},
-		Query: task,
-		Options: map[string]interface{}{
-			"user_id": userID,
-		},
+		Query:   task,
+		Options: options,
 	}
 
 	log.Printf("🤖 Starting autonomous work for user %d: %s", userID, task)
@@ -732,7 +793,14 @@ func (h *VibeCodingHandler) generateTestsOnce(ctx context.Context, session *Vibe
 
 // buildProjectContext строит контекст проекта для LLM
 func (h *VibeCodingHandler) buildProjectContext(session *VibeCodingSession) string {
+	// Используем сжатый контекст если доступен
+	if session.Context != nil {
+		return h.buildCompressedContext(session)
+	}
+
+	// Fallback к старому методу если контекст не сгенерирован
 	var context strings.Builder
+	context.WriteString("⚠️ Project context not available, using file excerpts:\n\n")
 
 	for filename, content := range session.Files {
 		context.WriteString(fmt.Sprintf("\n=== %s ===\n", filename))
@@ -745,6 +813,94 @@ func (h *VibeCodingHandler) buildProjectContext(session *VibeCodingSession) stri
 			context.WriteString(content)
 		}
 		context.WriteString("\n")
+	}
+
+	return context.String()
+}
+
+// buildCompressedContext строит сжатый LLM-генерируемый контекст для LLM
+func (h *VibeCodingHandler) buildCompressedContext(session *VibeCodingSession) string {
+	var context strings.Builder
+
+	ctx := session.Context
+
+	context.WriteString("# LLM-Generated Compressed Project Context\n\n")
+	context.WriteString(fmt.Sprintf("**Project:** %s | **Language:** %s | **Files:** %d | **Tokens:** %d/%d\n",
+		ctx.ProjectName, ctx.Language, ctx.TotalFiles, ctx.TokensUsed, ctx.TokensLimit))
+
+	if ctx.Description != "" {
+		context.WriteString(fmt.Sprintf("**Description:** %s\n", ctx.Description))
+	}
+	context.WriteString("\n")
+
+	// Краткая структура проекта
+	context.WriteString("## Project Structure:\n")
+	for i, dir := range ctx.Structure.Directories {
+		if i >= 5 { // Показываем только топ-5 директорий
+			context.WriteString(fmt.Sprintf("- ... и еще %d директорий\n", len(ctx.Structure.Directories)-5))
+			break
+		}
+		context.WriteString(fmt.Sprintf("- **%s** (%d files) - %s\n", dir.Path, dir.FileCount, dir.Purpose))
+	}
+	context.WriteString("\n")
+
+	// LLM-сгенерированные описания файлов
+	context.WriteString("## Key Files & LLM-Generated Descriptions:\n")
+	fileCount := 0
+	for filePath, fileCtx := range ctx.Files {
+		if fileCount >= 10 { // Показываем только первые 10 файлов
+			context.WriteString(fmt.Sprintf("- ... и еще %d файлов (используйте MCP tools для доступа)\n", len(ctx.Files)-10))
+			break
+		}
+		fileCount++
+
+		context.WriteString(fmt.Sprintf("\n### %s (%s, %d bytes, %d tokens)\n", filePath, fileCtx.Type, fileCtx.Size, fileCtx.TokensUsed))
+
+		if fileCtx.Summary != "" {
+			context.WriteString(fmt.Sprintf("**Summary:** %s\n", fileCtx.Summary))
+		}
+
+		if fileCtx.Purpose != "" {
+			context.WriteString(fmt.Sprintf("**Purpose:** %s\n", fileCtx.Purpose))
+		}
+
+		// Показываем ключевые элементы (LLM-определенные)
+		if len(fileCtx.KeyElements) > 0 {
+			context.WriteString(fmt.Sprintf("**Key Elements (%d):** ", len(fileCtx.KeyElements)))
+			elementNames := make([]string, 0, len(fileCtx.KeyElements))
+			for j, element := range fileCtx.KeyElements {
+				if j >= 5 { // Показываем только первые 5 элементов
+					elementNames = append(elementNames, "...")
+					break
+				}
+				elementNames = append(elementNames, element)
+			}
+			context.WriteString(strings.Join(elementNames, ", ") + "\n")
+		}
+
+		// Зависимости файла
+		if len(fileCtx.Dependencies) > 0 {
+			context.WriteString(fmt.Sprintf("**Dependencies:** %s\n", strings.Join(fileCtx.Dependencies, ", ")))
+		}
+	}
+
+	// Инструкции для работы с MCP
+	context.WriteString("\n## 🔧 MCP Tools Available:\n")
+	context.WriteString("- `vibe_list_files` - получить актуальный список файлов\n")
+	context.WriteString("- `vibe_read_file` - прочитать полное содержимое файла\n")
+	context.WriteString("- `vibe_write_file` - создать или изменить файл\n")
+	context.WriteString("- `vibe_execute_command` - выполнить команду в окружении\n")
+	context.WriteString("- `vibe_run_tests` - запустить тесты проекта\n")
+	context.WriteString("- `vibe_validate_code` - проверить синтаксис кода\n")
+	context.WriteString("- `vibe_get_session_info` - получить информацию о сессии\n\n")
+
+	context.WriteString("**ВАЖНО:** Этот контекст генерируется LLM с ограничением токенов. ")
+	context.WriteString("Используйте MCP tools для получения полного содержимого файлов и выполнения операций. ")
+	context.WriteString("Для больших файлов LLM может запросить содержимое через MCP по мере необходимости.\n")
+
+	// Добавляем PROJECT_CONTEXT.md в сгенерированные файлы для доступа через MCP
+	if _, exists := session.GeneratedFiles["PROJECT_CONTEXT.md"]; exists {
+		context.WriteString("\n📋 Полный LLM-контекст доступен в файле PROJECT_CONTEXT.md (используйте vibe_read_file)\n")
 	}
 
 	return context.String()
