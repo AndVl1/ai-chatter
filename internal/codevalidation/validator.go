@@ -37,6 +37,7 @@ type CodeAnalysisResult struct {
 	Dependencies    []string `json:"dependencies,omitempty"`
 	InstallCommands []string `json:"install_commands"`
 	Commands        []string `json:"commands"`
+	TestCommands    []string `json:"test_commands,omitempty"` // Команды для выполнения тестов
 	DockerImage     string   `json:"docker_image"`
 	ProjectType     string   `json:"project_type,omitempty"`
 	WorkingDir      string   `json:"working_dir,omitempty"` // Относительный путь к рабочей директории внутри /workspace
@@ -58,6 +59,7 @@ type ValidationResult struct {
 	RetryAttempt   int      `json:"retry_attempt,omitempty"`   // Номер попытки (для retry логики)
 	BuildProblems  []string `json:"build_problems,omitempty"`  // Проблемы со сборкой
 	CodeProblems   []string `json:"code_problems,omitempty"`   // Проблемы в коде
+	TotalTokens    int      `json:"total_tokens,omitempty"`    // Общее количество токенов за всю валидацию
 }
 
 // ProcessCodeValidation обрабатывает валидацию кода с progress tracking
@@ -79,6 +81,7 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 
 	const maxRetries = 3
 	var lastResult *ValidationResult
+	var totalTokens int // Накапливаем токены от всех LLM запросов
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		log.Printf("🔄 Validation attempt %d/%d", attempt, maxRetries)
@@ -98,6 +101,9 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 			// Повторные попытки - анализ с учетом предыдущих ошибок
 			analysis, err = w.analyzeProjectWithRetry(ctx, files, lastResult, attempt)
 		}
+
+		// Накапливаем токены от анализа проекта (примерная оценка)
+		totalTokens += w.estimateAnalysisTokens(files)
 
 		if err != nil {
 			if progressCallback != nil {
@@ -130,8 +136,12 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 					log.Printf("⚠️ Failed to answer user question: %v", err)
 				} else {
 					result.QuestionAnswer = answer
+					// Накапливаем токены от ответа на вопрос пользователя
+					totalTokens += w.estimateQuestionAnswerTokens(files, userQuestion, answer)
 				}
 			}
+			// Устанавливаем общее количество токенов
+			result.TotalTokens = totalTokens
 			log.Printf("✅ Code validation completed successfully on attempt %d", attempt)
 			return result, nil
 		}
@@ -141,6 +151,9 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 		result.ErrorAnalysis = errorAnalysis
 		result.BuildProblems = buildProblems
 		result.CodeProblems = codeProblems
+
+		// Накапливаем токены от анализа ошибок
+		totalTokens += w.estimateErrorAnalysisTokens(result, analysis)
 
 		log.Printf("📊 Error analysis: %s", errorAnalysis)
 		log.Printf("🔧 Build problems: %v", buildProblems)
@@ -156,8 +169,12 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 					log.Printf("⚠️ Failed to answer user question: %v", err)
 				} else {
 					result.QuestionAnswer = answer
+					// Накапливаем токены от ответа на вопрос пользователя
+					totalTokens += w.estimateQuestionAnswerTokens(files, userQuestion, answer)
 				}
 			}
+			// Устанавливаем общее количество токенов
+			result.TotalTokens = totalTokens
 			return result, nil
 		}
 
@@ -171,8 +188,12 @@ func (w *CodeValidationWorkflow) ProcessProjectValidationWithQuestion(ctx contex
 					log.Printf("⚠️ Failed to answer user question: %v", err)
 				} else {
 					result.QuestionAnswer = answer
+					// Накапливаем токены от ответа на вопрос пользователя
+					totalTokens += w.estimateQuestionAnswerTokens(files, userQuestion, answer)
 				}
 			}
+			// Устанавливаем общее количество токенов
+			result.TotalTokens = totalTokens
 			return result, nil
 		}
 
@@ -384,6 +405,7 @@ You MUST respond with valid JSON in this EXACT format. Do NOT include markdown c
   "dependencies": ["dependency1", "dependency2"],
   "install_commands": ["install command1", "install command2"],
   "commands": ["validation command1", "validation command2"],
+  "test_commands": ["test command1", "test command2"],
   "docker_image": "appropriate docker base image",
   "working_dir": "relative path within /workspace (empty for root, e.g. 'project-name' for subdirectory)",
   "reasoning": "explanation of choices made and why this is the simplest approach"
@@ -398,6 +420,7 @@ Single Kotlin file (NO Gradle needed):
   "dependencies": [],
   "install_commands": [],
   "commands": ["kotlinc hello.kt -include-runtime -d hello.jar", "java -jar hello.jar"],
+  "test_commands": ["kotlinc *Test.kt -include-runtime -d test.jar", "java -jar test.jar"],
   "docker_image": "openjdk:11-slim",
   "working_dir": "",
   "reasoning": "Single Kotlin file - using kotlinc directly instead of Gradle for simplicity"
@@ -410,6 +433,7 @@ Single Java file (NO Maven needed):
   "dependencies": [],
   "install_commands": [],
   "commands": ["javac *.java", "java Main"],
+  "test_commands": ["javac -cp . *Test.java", "java -cp . MainTest"],
   "docker_image": "openjdk:11-slim",
   "working_dir": "",
   "reasoning": "Single Java file - using javac directly instead of build system"
@@ -422,6 +446,7 @@ Python script (NO pip install needed):
   "dependencies": [],
   "install_commands": [],
   "commands": ["python -m py_compile *.py", "python main.py"],
+  "test_commands": ["python -m pytest -v", "python -m unittest discover -v"],
   "docker_image": "python:3.11-slim",
   "working_dir": "",
   "reasoning": "Simple Python script with no external dependencies"
@@ -434,9 +459,23 @@ C++ single file:
   "dependencies": [],
   "install_commands": ["apt-get update && apt-get install -y g++"],
   "commands": ["g++ -o program *.cpp", "./program"],
+  "test_commands": ["g++ -o test_program *test*.cpp", "./test_program"],
   "docker_image": "debian:bullseye-slim",
   "working_dir": "",
   "reasoning": "Single C++ file - direct compilation with g++"
+}
+
+Go script (NO go.mod needed):
+{
+  "language": "Go",
+  "project_type": "script",
+  "dependencies": [],
+  "install_commands": [],
+  "commands": ["go run *.go"],
+  "test_commands": ["go test -v", "go test ./..."],
+  "docker_image": "golang:1.22-alpine",
+  "working_dir": "",
+  "reasoning": "Simple Go script - direct execution without modules"
 }
 
 ONLY use complex build systems when they are ACTUALLY needed:
@@ -455,7 +494,8 @@ Python with requirements.txt:
   "project_type": "web application", 
   "dependencies": [],
   "install_commands": ["pip install -r requirements.txt"],
-  "commands": ["python -m flake8 *.py", "python -m pytest", "python app.py"],
+  "commands": ["python -m flake8 *.py", "python app.py"],
+  "test_commands": ["python -m pytest -v", "python -m unittest discover -v"],
   "docker_image": "python:3.11-slim",
   "working_dir": "",
   "reasoning": "Flask web app with requirements.txt - dependencies required"
@@ -468,10 +508,24 @@ Node.js with package.json:
   "project_type": "web application",
   "dependencies": [],
   "install_commands": ["npm install"],
-  "commands": ["npm run lint", "npm test", "npm start"],
+  "commands": ["npm run lint", "npm start"],
+  "test_commands": ["npm test", "npm run test", "node test.js"],
   "docker_image": "node:18-alpine",
   "working_dir": "",
   "reasoning": "Express.js app with package.json - npm needed for dependencies"
+}
+
+Go with go.mod:
+{
+  "language": "Go",
+  "project_type": "CLI application",
+  "dependencies": [],
+  "install_commands": ["go mod download"],
+  "commands": ["go build .", "go run ."],
+  "test_commands": ["go test -v ./...", "go test ./..."],
+  "docker_image": "golang:1.22-alpine",
+  "working_dir": "",
+  "reasoning": "Go project with go.mod - module dependencies required"
 }`
 
 	// Формируем описание проекта
@@ -656,6 +710,7 @@ You MUST respond with valid JSON in this EXACT format. Do NOT include markdown c
   "dependencies": ["dependency1", "dependency2"],
   "install_commands": ["install command1", "install command2"],
   "commands": ["validation command1", "validation command2"],
+  "test_commands": ["test command1", "test command2"],
   "docker_image": "appropriate docker base image",
   "working_dir": "relative path within /workspace (empty for root, e.g. 'project-name' for subdirectory)",
   "reasoning": "explanation of why this simpler approach was chosen based on previous errors"
@@ -910,4 +965,73 @@ func parseJSONResponse(content string, target interface{}) error {
 
 	// Добавляем недостающий import
 	return json.Unmarshal([]byte(content), target)
+}
+
+// estimateAnalysisTokens оценивает количество токенов для анализа проекта
+func (w *CodeValidationWorkflow) estimateAnalysisTokens(files map[string]string) int {
+	// Примерная оценка: системный промпт (~1500 токенов) + содержимое файлов (~4 символа на токен) + ответ (~300 токенов)
+	systemPromptTokens := 1500
+
+	var contentSize int
+	for _, content := range files {
+		if len(content) > 2000 {
+			contentSize += 2000 // Обрезаем длинные файлы
+		} else {
+			contentSize += len(content)
+		}
+	}
+	contentTokens := contentSize / 4 // Примерно 4 символа на токен
+
+	responseTokens := 300 // Примерная длина JSON ответа
+
+	return systemPromptTokens + contentTokens + responseTokens
+}
+
+// estimateQuestionAnswerTokens оценивает количество токенов для ответа на вопрос пользователя
+func (w *CodeValidationWorkflow) estimateQuestionAnswerTokens(files map[string]string, question, answer string) int {
+	// Системный промпт (~800 токенов) + структура файлов + содержимое + вопрос + ответ
+	systemPromptTokens := 800
+
+	var contentSize int
+	for filename, content := range files {
+		contentSize += len(filename) + 10 // Название файла + разметка
+		if len(content) > 1500 {
+			contentSize += 1500 // Обрезаем длинные файлы
+		} else {
+			contentSize += len(content)
+		}
+	}
+
+	contentTokens := contentSize / 4
+	questionTokens := len(question) / 4
+	answerTokens := len(answer) / 4
+
+	return systemPromptTokens + contentTokens + questionTokens + answerTokens
+}
+
+// estimateErrorAnalysisTokens оценивает количество токенов для анализа ошибок
+func (w *CodeValidationWorkflow) estimateErrorAnalysisTokens(result *ValidationResult, analysis *CodeAnalysisResult) int {
+	// Системный промпт (~750 токенов) + информация об ошибках + ответ
+	systemPromptTokens := 750
+
+	var errorContentSize int
+	for _, err := range result.Errors {
+		errorContentSize += len(err)
+	}
+	if result.Output != "" {
+		errorContentSize += len(result.Output)
+	}
+
+	contentTokens := errorContentSize / 4
+	responseTokens := 200 // Примерная длина JSON ответа
+
+	return systemPromptTokens + contentTokens + responseTokens
+}
+
+// AnalyzeProjectForVibeCoding экспортированный метод для анализа проектов в VibeCoding режиме
+func (w *CodeValidationWorkflow) AnalyzeProjectForVibeCoding(ctx context.Context, files map[string]string) (*CodeAnalysisResult, error) {
+	log.Printf("📊 VibeCoding: Analyzing project with %d files for language and framework detection", len(files))
+
+	// Используем тот же метод анализа, что и для валидации кода
+	return w.analyzeProject(ctx, files)
 }
