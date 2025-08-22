@@ -54,13 +54,62 @@ func (m *VibeCodingMCPClient) Connect(ctx context.Context, sessionManager *Sessi
 	return nil
 }
 
-// ConnectHTTP подключается к VibeCoding MCP серверу через HTTP (fallback to stdio)
-func (m *VibeCodingMCPClient) ConnectHTTP(ctx context.Context, sessionManager *SessionManager) error {
-	log.Printf("🌐 Attempting to connect to VibeCoding MCP server via HTTP")
-	log.Printf("⚠️ HTTP transport not yet available in MCP SDK - falling back to stdio")
+// ConnectWebSocket подключается к VibeCoding MCP серверу через WebSocket (неактивно)
+func (m *VibeCodingMCPClient) ConnectWebSocket(ctx context.Context, serverURL string) error {
+	log.Printf("⚠️  WebSocket transport not implemented - falling back to stdio")
+	return fmt.Errorf("WebSocket transport not available")
+}
 
-	// For now, use the existing stdio connection
-	return m.Connect(ctx, sessionManager)
+// ConnectHTTP подключается к VibeCoding MCP серверу через HTTP SSE
+func (m *VibeCodingMCPClient) ConnectHTTP(ctx context.Context, sessionManager *SessionManager) error {
+	log.Printf("🌐 Attempting to connect to VibeCoding MCP server via HTTP SSE")
+
+	// Try SSE HTTP connection
+	sseURL := "http://localhost:8082/mcp"
+	if customURL := os.Getenv("VIBECODING_SSE_URL"); customURL != "" {
+		sseURL = customURL
+	}
+
+	if err := m.ConnectSSE(ctx, sseURL); err != nil {
+		log.Printf("⚠️ SSE connection failed: %v - trying WebSocket fallback", err)
+
+		// Try WebSocket connection as fallback
+		websocketURL := "ws://localhost:8081/ws"
+		if customURL := os.Getenv("VIBECODING_WEBSOCKET_URL"); customURL != "" {
+			websocketURL = customURL
+		}
+
+		if err := m.ConnectWebSocket(ctx, websocketURL); err != nil {
+			log.Printf("⚠️ WebSocket connection also failed: %v - falling back to stdio", err)
+			return m.Connect(ctx, sessionManager)
+		}
+	}
+
+	return nil
+}
+
+// ConnectSSE подключается к VibeCoding MCP серверу через Server-Sent Events
+func (m *VibeCodingMCPClient) ConnectSSE(ctx context.Context, sseURL string) error {
+	log.Printf("🌐 Connecting to VibeCoding MCP server via SSE: %s", sseURL)
+
+	// Создаем MCP клиент
+	m.client = mcp.NewClient(&mcp.Implementation{
+		Name:    "ai-chatter-bot-vibecoding-sse",
+		Version: "1.0.0",
+	}, nil)
+
+	// Создаем SSE транспорт
+	transport := mcp.NewSSEClientTransport(sseURL, nil)
+
+	// Подключаемся через MCP клиент
+	session, err := m.client.Connect(ctx, transport)
+	if err != nil {
+		return fmt.Errorf("failed to connect to VibeCoding MCP server via SSE: %w", err)
+	}
+
+	m.session = session
+	log.Printf("✅ Connected to VibeCoding MCP server via SSE")
+	return nil
 }
 
 // Close закрывает соединение с VibeCoding MCP сервером
@@ -249,17 +298,23 @@ func (m *VibeCodingMCPClient) ExecuteCommand(ctx context.Context, userID int64, 
 
 // RunTests запускает тесты в VibeCoding сессии через MCP
 func (m *VibeCodingMCPClient) RunTests(ctx context.Context, userID int64, testFile string) VibeCodingMCPResult {
+	return m.RunTestsWithValidation(ctx, userID, testFile, false)
+}
+
+// RunTestsWithValidation запускает тесты с опциональной валидацией и исправлением
+func (m *VibeCodingMCPClient) RunTestsWithValidation(ctx context.Context, userID int64, testFile string, validateAndFix bool) VibeCodingMCPResult {
 	if m.session == nil {
 		return VibeCodingMCPResult{Success: false, Message: "VibeCoding MCP session not connected"}
 	}
 
-	log.Printf("🧪 Running tests via MCP for user %d", userID)
+	log.Printf("🧪 Running tests via MCP for user %d (validate_and_fix: %t)", userID, validateAndFix)
 
 	result, err := m.session.CallTool(ctx, &mcp.CallToolParams{
 		Name: "vibe_run_tests",
 		Arguments: map[string]any{
-			"user_id":   userID,
-			"test_file": testFile,
+			"user_id":          userID,
+			"test_file":        testFile,
+			"validate_and_fix": validateAndFix,
 		},
 	})
 

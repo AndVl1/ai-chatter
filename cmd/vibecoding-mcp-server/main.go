@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 	"time"
 
 	"ai-chatter/internal/vibecoding"
@@ -566,7 +567,51 @@ func (s *VibeCodingMCPServer) RunTests(ctx context.Context, session *mcp.ServerS
 		}, nil
 	}
 
-	// Используем тестовую команду из сессии
+	// Получаем опциональный параметр validate_and_fix
+	validateAndFix, _ := params.Arguments["validate_and_fix"].(bool)
+
+	if validateAndFix {
+		// Получаем список сгенерированных тестовых файлов для валидации
+		var testFilesToValidate []string
+		for filename := range vibeCodingSession.GeneratedFiles {
+			if strings.Contains(strings.ToLower(filename), "test") {
+				testFilesToValidate = append(testFilesToValidate, filename)
+			}
+		}
+
+		if len(testFilesToValidate) > 0 {
+			log.Printf("🧪 Running test validation for %d generated test files", len(testFilesToValidate))
+
+			// Запускаем валидацию и исправление тестов
+			if err := vibeCodingSession.ValidateAndFixTests(ctx, testFilesToValidate); err != nil {
+				return &mcp.CallToolResultFor[any]{
+					IsError: true,
+					Content: []mcp.Content{
+						&mcp.TextContent{Text: fmt.Sprintf("❌ Test validation failed: %v", err)},
+					},
+				}, nil
+			}
+
+			// Возвращаем результат валидации
+			resultMessage := fmt.Sprintf("✅ Test Validation Completed\n\n**Validated Files:** %d\n**All tests passed after validation and fixes**",
+				len(testFilesToValidate))
+
+			return &mcp.CallToolResultFor[any]{
+				Content: []mcp.Content{
+					&mcp.TextContent{Text: resultMessage},
+				},
+				Meta: map[string]interface{}{
+					"user_id":         userID,
+					"test_file":       testFile,
+					"validated_files": testFilesToValidate,
+					"success":         true,
+					"validation_mode": true,
+				},
+			}, nil
+		}
+	}
+
+	// Стандартный режим - просто запускаем тесты
 	var testCommand string
 	if vibeCodingSession.TestCommand != "" {
 		testCommand = vibeCodingSession.TestCommand
@@ -727,7 +772,7 @@ func main() {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "vibe_run_tests",
-		Description: "Runs tests for the VibeCoding project using the configured test command",
+		Description: "Runs tests for the VibeCoding project using the configured test command. Set validate_and_fix=true to automatically validate generated tests and fix failures.",
 	}, vibeCodingServer.RunTests)
 
 	mcp.AddTool(server, &mcp.Tool{

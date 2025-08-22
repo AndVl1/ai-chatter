@@ -172,12 +172,12 @@ func TestSessionManager_HasActiveSession(t *testing.T) {
 func TestVibeCodingSession_GenerateTestCommand(t *testing.T) {
 	session := &VibeCodingSession{
 		Analysis: &codevalidation.CodeAnalysisResult{
-			Language: "Python",
-			Commands: []string{}, // No test commands in analysis
+			Language:     "Python",
+			TestCommands: []string{"python -m pytest -v", "python -m unittest discover -v"}, // Test commands in analysis
 		},
 	}
 
-	expected := "python -m pytest -v || python -m unittest discover -v"
+	expected := "python -m pytest -v" // Теперь возвращает первую команду из TestCommands
 	result := session.generateTestCommand()
 	if result != expected {
 		t.Errorf("generateTestCommand() = %s, expected %s", result, expected)

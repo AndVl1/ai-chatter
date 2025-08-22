@@ -549,8 +549,17 @@ func (d *DockerClient) getWorkingDirectory(ctx context.Context, containerID stri
 
 	// Если LLM указала working_dir, проверим её, но приоритет у автоматического определения
 	if analysis.WorkingDir != "" {
-		workspaceBase := "/workspace"
-		targetDir := fmt.Sprintf("%s/%s", workspaceBase, analysis.WorkingDir)
+		// Нормализуем путь - если он уже абсолютный (начинается с /), используем как есть
+		var targetDir string
+		if strings.HasPrefix(analysis.WorkingDir, "/") {
+			targetDir = analysis.WorkingDir
+		} else {
+			workspaceBase := "/workspace"
+			targetDir = fmt.Sprintf("%s/%s", workspaceBase, analysis.WorkingDir)
+		}
+
+		// Убираем дублирующиеся слэши
+		targetDir = strings.ReplaceAll(targetDir, "//", "/")
 
 		checkCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "test", "-d", targetDir)
 		if err := checkCmd.Run(); err != nil {

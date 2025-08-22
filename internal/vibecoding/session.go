@@ -57,6 +57,13 @@ func NewSessionManager() *SessionManager {
 	return sm
 }
 
+// NewSessionManagerWithoutWebServer создает менеджер сессий без веб-сервера
+func NewSessionManagerWithoutWebServer() *SessionManager {
+	return &SessionManager{
+		sessions: make(map[int64]*VibeCodingSession),
+	}
+}
+
 // CreateSession создает новую сессию вайбкодинга
 func (sm *SessionManager) CreateSession(userID, chatID int64, projectName string, files map[string]string, llmClient llm.Client) (*VibeCodingSession, error) {
 	sm.mutex.Lock()
@@ -176,12 +183,7 @@ func (s *VibeCodingSession) SetupEnvironment(ctx context.Context) error {
 
 	log.Printf("🔥 Setting up environment for vibecoding session: %s", s.ProjectName)
 
-	// Запускаем VibeCoding MCP сервер в контейнере после создания
-	defer func() {
-		if s.ContainerID != "" {
-			go s.startMCPServerInContainer(ctx)
-		}
-	}()
+	// Примечание: VibeCoding MCP сервер запускается отдельно, клиенты подключаются к нему
 
 	maxAttempts := 3
 	var lastError error
@@ -1359,28 +1361,16 @@ func (s *VibeCodingSession) GetProjectContext() *ProjectContextLLM {
 
 // RefreshProjectContext обновляет контекст проекта (например, после изменений)
 func (s *VibeCodingSession) RefreshProjectContext() error {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-
 	log.Printf("🔄 Refreshing LLM project context...")
 
-	// Используем LLM-генератор контекста с лимитом токенов (5000 по умолчанию)
-	generator := NewLLMContextGenerator(s.LLMClient, 5000)
-	allFiles := s.GetAllFiles()
-
+	// Используем новую унифицированную архитектуру для пересоздания контекста
+	// Не используем mutex здесь, так как analyzeProjectAndGenerateContext может содержать собственные блокировки
 	ctx := context.Background()
-	context, err := generator.GenerateContext(ctx, s.ProjectName, allFiles)
-	if err != nil {
-		return fmt.Errorf("failed to refresh LLM context: %w", err)
+	if err := s.analyzeProjectAndGenerateContext(ctx); err != nil {
+		return fmt.Errorf("failed to refresh LLM context using unified analysis: %w", err)
 	}
 
-	s.Context = context
-
-	// Обновляем PROJECT_CONTEXT.md
-	contextMarkdown := s.generateContextMarkdown()
-	s.AddGeneratedFile("PROJECT_CONTEXT.md", contextMarkdown)
-
-	log.Printf("✅ LLM project context refreshed: %d/%d tokens", context.TokensUsed, context.TokensLimit)
+	log.Printf("✅ LLM project context refreshed successfully")
 	return nil
 }
 
@@ -1404,4 +1394,186 @@ func (s *VibeCodingSession) countTotalFiles() int {
 	}
 
 	return len(s.Context.Files)
+}
+
+// ValidateAndFixTests проверяет сгенерированные тесты и запрашивает исправления если они не проходят
+func (s *VibeCodingSession) ValidateAndFixTests(ctx context.Context, testFiles []string) error {
+	const maxAttempts = 3
+
+	s.mutex.Lock()
+	defer s.mutex.Unlock()
+
+	log.Printf("🧪 Starting test validation for %d test files", len(testFiles))
+
+	for _, testFile := range testFiles {
+		log.Printf("🔍 Validating test file: %s", testFile)
+
+		// Проверяем, является ли файл сгенерированным тестом
+		if !s.isTestFile(testFile) {
+			log.Printf("⏭️ Skipping non-test file: %s", testFile)
+			continue
+		}
+
+		// Запускаем тесты для этого файла с несколькими попытками исправления
+		for attempt := 1; attempt <= maxAttempts; attempt++ {
+			log.Printf("🧪 Running test validation attempt %d/%d for %s", attempt, maxAttempts, testFile)
+
+			// Запуск тестов
+			result, err := s.ExecuteCommand(ctx, s.buildTestCommand(testFile))
+			if err != nil {
+				log.Printf("❌ Failed to execute test command: %v", err)
+				return fmt.Errorf("failed to execute test for %s: %w", testFile, err)
+			}
+
+			// Если тесты прошли, переходим к следующему файлу
+			if result.Success && result.ExitCode == 0 {
+				log.Printf("✅ Test %s passed on attempt %d", testFile, attempt)
+				break
+			}
+
+			// Если тесты провалились и это не последняя попытка, запрашиваем исправления
+			if attempt < maxAttempts {
+				log.Printf("❌ Test %s failed on attempt %d (exit code: %d), requesting fixes...", testFile, attempt, result.ExitCode)
+
+				if err := s.requestTestFix(ctx, testFile, result.Output); err != nil {
+					log.Printf("⚠️ Failed to request test fix: %v", err)
+					continue // Попробуем еще раз без исправления
+				}
+			} else {
+				// Последняя попытка - логируем провал
+				log.Printf("❌ Test %s failed after %d attempts (final exit code: %d)", testFile, maxAttempts, result.ExitCode)
+				return fmt.Errorf("test %s failed after %d attempts: %s", testFile, maxAttempts, result.Output)
+			}
+		}
+	}
+
+	log.Printf("✅ All test files validated successfully")
+	return nil
+}
+
+// isTestFile проверяет, является ли файл тестом
+func (s *VibeCodingSession) isTestFile(filename string) bool {
+	// Определяем по расширению и паттернам имен
+	lowerName := strings.ToLower(filename)
+
+	// Общие паттерны тестовых файлов
+	testPatterns := []string{
+		"test_", "_test.", "test.", ".test.",
+		"spec_", "_spec.", ".spec.",
+		"__test__", "__tests__",
+	}
+
+	for _, pattern := range testPatterns {
+		if strings.Contains(lowerName, pattern) {
+			return true
+		}
+	}
+
+	// Языко-специфичные паттерны
+	if s.Analysis != nil {
+		switch strings.ToLower(s.Analysis.Language) {
+		case "go":
+			return strings.HasSuffix(lowerName, "_test.go")
+		case "python":
+			return strings.HasPrefix(lowerName, "test_") || strings.HasSuffix(lowerName, "_test.py")
+		case "javascript", "typescript", "node.js":
+			return strings.Contains(lowerName, ".test.") || strings.Contains(lowerName, ".spec.") || strings.Contains(lowerName, "__tests__")
+		case "java":
+			return strings.HasSuffix(lowerName, "test.java") || strings.HasSuffix(lowerName, "tests.java")
+		}
+	}
+
+	return false
+}
+
+// buildTestCommand создает команду для запуска конкретного тестового файла
+func (s *VibeCodingSession) buildTestCommand(testFile string) string {
+	if s.TestCommand == "" {
+		return fmt.Sprintf("echo 'No test command configured for %s'", testFile)
+	}
+
+	// Если команда содержит плейсхолдер, заменяем его
+	if strings.Contains(s.TestCommand, "%s") || strings.Contains(s.TestCommand, "{file}") {
+		command := strings.ReplaceAll(s.TestCommand, "{file}", testFile)
+		return fmt.Sprintf(command, testFile)
+	}
+
+	// Для некоторых языков добавляем файл к команде
+	if s.Analysis != nil {
+		switch strings.ToLower(s.Analysis.Language) {
+		case "go":
+			return fmt.Sprintf("go test -v %s", testFile)
+		case "python":
+			return fmt.Sprintf("python -m pytest %s -v", testFile)
+		case "javascript", "node.js":
+			return fmt.Sprintf("npm test -- %s", testFile)
+		}
+	}
+
+	// По умолчанию просто запускаем общую команду тестирования
+	return s.TestCommand
+}
+
+// requestTestFix запрашивает исправление провалившегося теста у LLM
+func (s *VibeCodingSession) requestTestFix(ctx context.Context, testFile string, errorOutput string) error {
+	log.Printf("🔧 Requesting LLM to fix failing test: %s", testFile)
+
+	// Получаем содержимое теста
+	testContent, exists := s.GeneratedFiles[testFile]
+	if !exists {
+		// Проверяем в обычных файлах
+		testContent, exists = s.Files[testFile]
+		if !exists {
+			return fmt.Errorf("test file %s not found", testFile)
+		}
+	}
+
+	// Формируем запрос к LLM
+	prompt := fmt.Sprintf(`Тест не прошел проверку. Нужно исправить ошибки.
+
+**Файл теста:** %s
+
+**Содержимое теста:**
+%s
+
+**Ошибки при выполнении:**
+%s
+
+**Задача:** Исправить тест так, чтобы он корректно работал. Верни только исправленный код теста без дополнительных объяснений.
+
+**Требования:**
+1. Сохрани исходную логику тестирования
+2. Исправь синтаксические ошибки
+3. Исправь проблемы с импортами/зависимостями  
+4. Убедись что тест покрывает нужную функциональность
+5. Возвращай только код без markdown форматирования`, testFile, testContent, errorOutput)
+
+	// Отправляем запрос к LLM
+	messages := []llm.Message{
+		{Role: "system", Content: "Ты - опытный программист, специализирующийся на исправлении тестов. Отвечай только исправленным кодом."},
+		{Role: "user", Content: prompt},
+	}
+
+	response, err := s.LLMClient.Generate(ctx, messages)
+	if err != nil {
+		return fmt.Errorf("failed to get LLM response for test fix: %w", err)
+	}
+
+	// Извлекаем исправленный код
+	fixedCode := strings.TrimSpace(response.Content)
+
+	// Убираем markdown форматирование если есть
+	if strings.HasPrefix(fixedCode, "```") {
+		lines := strings.Split(fixedCode, "\n")
+		if len(lines) > 2 {
+			// Убираем первую и последнюю строки с ```
+			fixedCode = strings.Join(lines[1:len(lines)-1], "\n")
+		}
+	}
+
+	// Сохраняем исправленный тест
+	s.GeneratedFiles[testFile] = fixedCode
+	log.Printf("✅ Test %s has been fixed by LLM", testFile)
+
+	return nil
 }

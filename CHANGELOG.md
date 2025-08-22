@@ -2,6 +2,80 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Day 12 - VibeCoding Critical Fixes and Architecture Improvements]
+
+### Fixed (2025-08-22) - Critical VibeCoding Issues
+- **MCP Architecture Alignment**: Removed hardcoded MCP tools from VibeCoding sessions to follow Notion/Gmail pattern
+  - **Dynamic Tool Discovery**: VibeCoding now uses external MCP client connection like Notion and Gmail
+  - **Simplified Session Creation**: Removed `startMCPServerInContainer` from session initialization 
+  - **Consistent Architecture**: All MCP services now follow the same pattern for tool registration
+- **SSE Connection Issues**: Fixed persistent connection refused errors to VibeCoding MCP server
+  - **Server Cleanup**: Eliminated conflicting MCP server instances running on multiple ports
+  - **Proper Port Management**: HTTP SSE server now runs cleanly on port 8082
+  - **Connection Validation**: Added connection testing to ensure MCP server availability
+- **Enhanced Test Generation Logging**: Added detailed progress tracking with real-time Telegram updates
+  - **Progress Messages**: Step-by-step updates during test generation attempts (`generateTestsWithProgress`)
+  - **Attempt Tracking**: Real-time display of current attempt number and maximum attempts
+  - **Error Messaging**: Detailed error reporting for each failed attempt with 2-second user feedback delays
+  - **Success Confirmation**: Clear success messaging with attempt count when tests are generated successfully
+- **File Synchronization Fix**: Implemented bidirectional file sync between web interface and bot sessions
+  - **Save API Endpoint**: New `/api/save/{userID}` POST endpoint for saving files from web interface
+  - **Docker Container Sync**: Automatic synchronization of saved files to Docker containers
+  - **Editable Web Interface**: Converted read-only `<pre>` to editable `<textarea>` with save functionality
+  - **Save Button Integration**: Added "💾 Save File" button with progress feedback and error handling
+  - **File State Management**: Proper tracking of file paths, generated status, and user context
+- **Smart Test Validation**: Enhanced test generation to prevent testing non-existent functions and classes
+  - **Function/Class Discovery**: New `extractFunctionsAndClasses()` method to analyze project structure
+  - **Enhanced Context**: `formatProjectFilesForValidation()` now provides comprehensive function/class listings
+  - **Intelligent Validation**: LLM validation specifically checks against available functions and classes
+- **Strict Test Execution Validation**: Fixed core issue where tests passed validation but failed execution
+  - **Real Execution Testing**: Added `executeTestForValidation()` method that runs tests during validation phase
+  - **Enhanced Error Categorization**: Improved error type detection (syntax_error, missing_dependency, invalid_reference, test_failure)
+  - **Validation-Execution Alignment**: Only tests that actually execute successfully are marked as valid
+  - **Critical LLM Validation**: Enhanced validation prompt with strict requirements for function/class existence checking
+  - **Zero Tolerance Policy**: Tests must pass both LLM validation AND actual execution to be saved
+- **Intelligent Test Prompt Generation**: Added specialized test writing prompt generation through LLM analysis
+  - **Language-Specific Prompts**: `generateTestWritingPrompt()` creates prompts tailored to specific programming languages
+  - **Project-Aware Instructions**: Prompts include project structure, dependencies, and testing framework recommendations
+  - **Failure Prevention Rules**: Generated prompts include specific rules to prevent common test failures
+  - **Framework Detection**: Automatic detection and recommendation of appropriate testing frameworks
+  - **Pitfall Avoidance**: LLM-generated lists of common mistakes to avoid for each language
+  - **Context Integration**: Project files, dependencies, and structure analysis integrated into test generation
+  - **Critical Issue Detection**: Tests referencing non-existent code are flagged as critical issues
+  - **Improved Context Size**: Increased file content limits and file count for better LLM understanding
+
+### Testing Infrastructure (2025-08-22)
+- **Comprehensive Test Coverage**: Added extensive unit tests for new VibeCoding functionality
+  - **New Test File**: Created `internal/vibecoding/commands_test.go` with 11 comprehensive tests
+  - **Mock Infrastructure**: Implemented `MockLLMClient` and `MockTelegramSender` for isolated testing
+  - **Test Scenarios**: Tests cover successful operations, error handling, and edge cases
+  - **Function/Class Extraction**: Tests for `extractFunctionsAndClasses()` and `extractNameFromDefinition()`
+  - **Go Method Support**: Enhanced `extractNameFromDefinition()` to properly parse Go receiver methods
+  - **Prompt Generation Tests**: Full test coverage for `generateTestWritingPrompt()` with mocked LLM responses
+  - **Validation Tests**: Tests for `validateTestsWithLLM()`, `isTestCommandSuitableForFile()`, and `adaptTestCommandForFile()`
+  - **Error Simulation**: Tests for LLM failure scenarios and configuration errors
+  - **Performance Testing**: Benchmark tests for prompt generation performance
+- **Fixed Existing Tests**: Corrected failing test in `session_test.go` for new `TestCommands` structure
+  - **Test Command Generation**: Updated test expectations to match new LLM-based test command structure
+  - **Mock Docker Support**: All tests work with mock Docker client when Docker is not available
+- **Critical Bug Fix**: Fixed panic in `/vibecoding_info` command when session has no context
+  - **Root Cause**: `handleInfoCommand` tried to access non-existent `context_functions` and `context_structs` fields
+  - **Solution**: Replaced with safe access to existing `context_files_count` field
+  - **Regression Tests**: Added `TestHandleInfoCommand_WithoutContext` and `TestHandleInfoCommand_WithContext` tests
+  - **Error Location**: `internal/vibecoding/commands.go:252` - interface conversion panic eliminated
+
+### Technical Improvements (2025-08-22)
+- **Web Interface Enhancements**:
+  - **Flexible File Header**: Added flexbox layout for file header with save button placement
+  - **Save Button Styling**: Comprehensive CSS styling for save button states (normal, hover, disabled, success, error)
+  - **JavaScript File Management**: Enhanced file content loading with edit capability and save functionality
+  - **Error Handling**: Robust error handling for save operations with user feedback
+- **Test Generation Robustness**:
+  - **Pattern Recognition**: Enhanced function/class detection for Python, Go, and Java
+  - **Context Analysis**: Systematic extraction of available code elements from project files
+  - **Validation Rules**: Strict LLM validation rules to prevent testing non-existent code
+  - **Content Limits**: Increased context limits (1500 chars per file, 8 files max) for better analysis
+
 ## [Day 12 - VibeCoding Unified LLM Architecture]
 
 ### Enhanced (2025-08-22) - Unified LLM Request for Analysis and Context Generation
@@ -20,6 +94,55 @@ All notable changes to this project will be documented in this file.
   - **Better Token Efficiency**: Более эффективное использование токенов через единый контекст
   - **Faster Setup Time**: Сокращение времени инициализации сессии
   - **Reduced Complexity**: Упрощение архитектуры и устранение race conditions
+
+### Enhanced (2025-08-22) - VibeCoding Admin Panel and Test Validation
+- **VibeCoding Admin Panel (:8080)**:
+  - **Context Viewing**: Added compressed context viewing with "📄 View Context" button (`internal/vibecoding/webserver.go`)
+  - **Generated Files Fix**: Fixed file path handling with URL decoding and prefix cleanup for generated files
+  - **Enhanced UI**: Better styling and error handling for context and file operations
+- **Test Validation System**:
+  - **Intelligent Test Validation**: `ValidateAndFixTests` method checks generated tests and requests LLM fixes if they fail
+  - **Language Detection**: Automatic test language detection (Go, Python, JavaScript, etc.)
+  - **MCP Integration**: Seamless integration with Model Context Protocol for test execution
+- **Context Refresh Fix**: Fixed hanging issue in "Refreshing LLM project context" by updating to unified architecture
+
+### Enhanced (2025-08-22) - MCP Transport Redesign
+- **HTTP SSE MCP Transport**: Successfully implemented HTTP Server-Sent Events transport instead of WebSocket
+  - **SSE MCP Server**: New `cmd/vibecoding-mcp-http-server/main.go` with full MCP tool registration
+  - **SSE Client Support**: Updated `internal/vibecoding/mcp_client.go` with `ConnectSSE()` method
+  - **Fallback Architecture**: HTTP SSE → WebSocket → Stdio transport fallback chain
+  - **Session Manager**: Added `NewSessionManagerWithoutWebServer()` to avoid port conflicts
+- **MCP Utility Functions**: New `internal/vibecoding/mcp_utils.go` with helper functions:
+  - **ParseUserID**: Universal user ID parsing for various input types
+  - **FormatFileList**: Consistent file list formatting across transports  
+  - **FormatSessionInfo**: Unified session information display
+- **WebSocket Transport**: Attempted custom WebSocket implementation but switched to HTTP SSE due to MCP SDK interface constraints
+  - **Design Decision**: HTTP SSE provides better compatibility with MCP SDK's sealed interface design
+  - **Performance**: SSE offers reliable HTTP-based communication without custom transport complexity
+- **WebSocket MCP Foundation**: Created foundation for WebSocket transport (deferred due to MCP SDK constraints)
+  - **Dependencies**: Added gorilla/websocket dependency for future WebSocket support
+  - **Complete Server**: Implemented full WebSocket MCP server with all VibeCoding tools at `:8081/ws`
+
+### Fixed (2025-08-22) - Critical Bug Fixes
+- **File Path Issues**: Fixed directory path duplication in test execution (`/workspace//workspace` → `/workspace`)
+  - **Path Normalization**: Added intelligent path handling in `internal/codevalidation/docker.go`
+  - **Duplicate Slash Removal**: Automatic cleanup of malformed paths like `//workspace` 
+  - **Absolute Path Support**: Proper handling of both relative and absolute working directories
+- **MCP Connection Issues**: Resolved all MCP server connectivity problems
+  - **Binary Build**: Added vibecoding-mcp-server and vibecoding-mcp-http-server to Makefile
+  - **Port Management**: Properly configured HTTP SSE server on port 8082
+  - **Fallback Chain**: Ensured stdio MCP server is available as fallback
+  - **Makefile Integration**: Added `make vibe-mcp` and `make vibe-http` targets
+
+### Summary
+Successfully completed all 5 requested tasks + critical fixes:
+✅ **Admin Panel Context Viewing**: Added compressed context viewing to :8080/
+✅ **Generated Files Fix**: Fixed file viewing issues in admin panel with robust path handling
+✅ **Test Validation**: Implemented intelligent test validation with automatic LLM-based fixing
+✅ **MCP Transport**: Redesigned to use HTTP SSE transport (better than WebSocket for MCP SDK compatibility)
+✅ **Context Refresh Fix**: Resolved hanging issue by updating to unified LLM architecture
+✅ **Path Fixes**: Fixed duplicate directory paths preventing test execution
+✅ **MCP Server Setup**: Resolved connection refused errors with proper server binary builds
 
 ### Enhanced (2025-08-21) - LLM Integration with Project Context
 - **Autonomous Work Enhancement**: Сжатый контекст передается в автономные LLM запросы

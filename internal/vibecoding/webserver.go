@@ -7,6 +7,8 @@ import (
 	"html/template"
 	"log"
 	"net/http"
+	"net/url"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -64,6 +66,8 @@ func (ws *WebServer) Start() error {
 	mux.HandleFunc("/static/", ws.handleStatic)        // Статические файлы
 	mux.HandleFunc("/api/status", ws.handleStatus)     // Health check endpoint
 	mux.HandleFunc("/api/sessions", ws.handleSessions) // Список всех сессий (админ)
+	mux.HandleFunc("/api/context/", ws.handleContext)  // API для получения контекста сессии
+	mux.HandleFunc("/api/save/", ws.handleSaveFile)    // API для сохранения файлов
 	mux.HandleFunc("/vibe_", ws.handleVibeSession)     // HTML страницы vibe сессий
 	mux.HandleFunc("/admin", ws.handleAdmin)           // Админская страница
 	mux.HandleFunc("/", ws.handleRoot)                 // Корневой обработчик (должен быть последним)
@@ -90,6 +94,133 @@ func (ws *WebServer) Stop() error {
 	defer cancel()
 
 	return ws.server.Shutdown(ctx)
+}
+
+// handleContext обрабатывает API запросы на получение контекста сессии
+func (ws *WebServer) handleContext(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Извлекаем userID из URL: /api/context/{userID}
+	path := strings.TrimPrefix(r.URL.Path, "/api/context/")
+	if path == "" || path == r.URL.Path {
+		http.Error(w, "User ID is required in path /api/context/{userID}", http.StatusBadRequest)
+		return
+	}
+
+	userID, err := strconv.ParseInt(path, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		return
+	}
+
+	// Получаем сессию
+	session := ws.sessionManager.GetSession(userID)
+	if session == nil {
+		http.Error(w, "VibeCoding session not found", http.StatusNotFound)
+		return
+	}
+
+	session.mutex.RLock()
+	defer session.mutex.RUnlock()
+
+	// Читаем context JSON файл из рабочей директории
+	workingDir := "."
+	if session.Analysis != nil && session.Analysis.WorkingDir != "" {
+		workingDir = session.Analysis.WorkingDir
+	}
+
+	contextPath := filepath.Join(workingDir, "vibecoding-context.json")
+	contextData, err := os.ReadFile(contextPath)
+	if err != nil {
+		log.Printf("❌ Failed to read context file %s: %v", contextPath, err)
+		http.Error(w, "Context file not found or not readable", http.StatusNotFound)
+		return
+	}
+
+	// Возвращаем JSON контекст
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Write(contextData)
+}
+
+// handleSaveFile обрабатывает сохранение файлов через веб-интерфейс
+func (ws *WebServer) handleSaveFile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Извлекаем userID из URL: /api/save/{userID}
+	path := strings.TrimPrefix(r.URL.Path, "/api/save/")
+	userID, err := strconv.ParseInt(path, 10, 64)
+	if err != nil {
+		http.Error(w, "Invalid user ID", http.StatusBadRequest)
+		return
+	}
+
+	// Получаем сессию
+	session := ws.sessionManager.GetSession(userID)
+	if session == nil {
+		http.Error(w, "VibeCoding session not found", http.StatusNotFound)
+		return
+	}
+
+	// Парсим JSON запрос
+	var saveRequest struct {
+		Filename  string `json:"filename"`
+		Content   string `json:"content"`
+		Generated bool   `json:"generated,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&saveRequest); err != nil {
+		http.Error(w, "Invalid JSON request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	if saveRequest.Filename == "" {
+		http.Error(w, "Filename is required", http.StatusBadRequest)
+		return
+	}
+
+	session.mutex.Lock()
+	defer session.mutex.Unlock()
+
+	// Сохраняем файл в соответствующую карту
+	if saveRequest.Generated {
+		session.GeneratedFiles[saveRequest.Filename] = saveRequest.Content
+		log.Printf("💾 Saved generated file via web interface: %s (user %d)", saveRequest.Filename, userID)
+	} else {
+		session.Files[saveRequest.Filename] = saveRequest.Content
+		log.Printf("💾 Saved original file via web interface: %s (user %d)", saveRequest.Filename, userID)
+	}
+
+	// Синхронизируем с Docker контейнером
+	if session.ContainerID != "" {
+		filesToSync := map[string]string{
+			saveRequest.Filename: saveRequest.Content,
+		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		if err := session.Docker.CopyFilesToContainer(ctx, session.ContainerID, filesToSync); err != nil {
+			log.Printf("⚠️ Failed to sync file to container: %v", err)
+		} else {
+			log.Printf("🔄 Synced file to container: %s", saveRequest.Filename)
+		}
+	}
+
+	// Возвращаем успешный ответ
+	response := map[string]interface{}{
+		"success":  true,
+		"message":  "File saved successfully",
+		"filename": saveRequest.Filename,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(response)
 }
 
 // handleVibeSession обрабатывает запросы на страницы сессий
@@ -176,20 +307,55 @@ func (ws *WebServer) handleFileContent(w http.ResponseWriter, r *http.Request, s
 	session.mutex.RLock()
 	defer session.mutex.RUnlock()
 
+	// Декодируем URL-encoded путь
+	decodedPath, err := url.QueryUnescape(filePath)
+	if err != nil {
+		decodedPath = filePath // Fallback to original if decoding fails
+	}
+
 	// Ищем файл в основных файлах
-	if content, exists := session.Files[filePath]; exists {
+	if content, exists := session.Files[decodedPath]; exists {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(content))
 		return
 	}
 
-	// Ищем в сгенерированных файлах
-	if content, exists := session.GeneratedFiles[filePath]; exists {
+	// Ищем в сгенерированных файлах - сначала как есть
+	if content, exists := session.GeneratedFiles[decodedPath]; exists {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		w.Write([]byte(content))
 		return
 	}
 
+	// Если не нашли, пробуем очистить префиксы для сгенерированных файлов
+	cleanPath := strings.TrimPrefix(decodedPath, "[generated] ")
+	cleanPath = strings.TrimSuffix(cleanPath, " (generated)")
+
+	if content, exists := session.GeneratedFiles[cleanPath]; exists {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.Write([]byte(content))
+		return
+	}
+
+	// Если всё ещё не нашли, попробуем найти файл в файловой структуре как есть
+	// Это для случаев, когда путь уже содержит [generated] префикс
+	for path, content := range session.Files {
+		if path == decodedPath || "[generated] "+path == decodedPath {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Write([]byte(content))
+			return
+		}
+	}
+
+	for path, content := range session.GeneratedFiles {
+		if "[generated] "+path == decodedPath {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			w.Write([]byte(content))
+			return
+		}
+	}
+
+	log.Printf("❌ File not found: %s (original: %s)", decodedPath, filePath)
 	http.Error(w, "File not found", http.StatusNotFound)
 }
 
@@ -423,8 +589,9 @@ func getHTMLTemplate() string {
                 <div class="file-viewer">
                     <div class="file-header">
                         <span id="current-file">Select a file to view</span>
+                        <button id="save-file-btn" onclick="saveCurrentFile()" class="btn save-btn" style="display: none;">💾 Save File</button>
                     </div>
-                    <pre id="file-content" class="file-content">No file selected</pre>
+                    <textarea id="file-content" class="file-content" placeholder="No file selected" readonly></textarea>
                 </div>
             </main>
         </div>
@@ -599,6 +766,9 @@ body {
     border-bottom: 1px solid #444;
     color: #ff6b35;
     font-weight: bold;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
 }
 
 .file-content {
@@ -720,12 +890,76 @@ function loadFileContent(filePath, fileName, userId) {
             return response.text();
         })
         .then(content => {
-            contentElement.textContent = content;
+            contentElement.value = content;
+            contentElement.readOnly = false;
+            
+            // Показываем кнопку сохранения
+            const saveBtn = document.getElementById('save-file-btn');
+            saveBtn.style.display = 'block';
+            
+            // Сохраняем текущие параметры для последующего сохранения
+            window.currentFile = {
+                path: filePath,
+                name: fileName,
+                userId: userId,
+                generated: filePath.startsWith('[generated]')
+            };
         })
         .catch(error => {
-            contentElement.textContent = 'Error loading file: ' + error.message;
+            contentElement.value = 'Error loading file: ' + error.message;
+            contentElement.readOnly = true;
+            document.getElementById('save-file-btn').style.display = 'none';
             console.error('Error loading file:', error);
         });
+}
+
+function saveCurrentFile() {
+    if (!window.currentFile) {
+        alert('No file is currently loaded');
+        return;
+    }
+    
+    const saveBtn = document.getElementById('save-file-btn');
+    const contentElement = document.getElementById('file-content');
+    
+    // Отключаем кнопку во время сохранения
+    saveBtn.disabled = true;
+    saveBtn.textContent = '💾 Saving...';
+    
+    const saveData = {
+        filename: window.currentFile.path.replace('[generated] ', ''), // убираем префикс для generated файлов
+        content: contentElement.value,
+        generated: window.currentFile.generated
+    };
+    
+    fetch('/api/save/' + window.currentFile.userId, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(saveData)
+    })
+    .then(response => response.json())
+    .then(result => {
+        if (result.success) {
+            saveBtn.textContent = '✅ Saved!';
+            setTimeout(() => {
+                saveBtn.textContent = '💾 Save File';
+                saveBtn.disabled = false;
+            }, 2000);
+        } else {
+            throw new Error(result.message || 'Save failed');
+        }
+    })
+    .catch(error => {
+        alert('Failed to save file: ' + error.message);
+        saveBtn.textContent = '❌ Save Failed';
+        setTimeout(() => {
+            saveBtn.textContent = '💾 Save File';
+            saveBtn.disabled = false;
+        }, 3000);
+        console.error('Save error:', error);
+    });
 }
 
 // Автообновление каждые 30 секунд
@@ -849,9 +1083,14 @@ func (ws *WebServer) handleAdmin(w http.ResponseWriter, r *http.Request) {
         .session-header { font-weight: bold; color: #1976d2; margin-bottom: 10px; }
         .session-meta { font-size: 14px; color: #666; }
         .session-actions { margin-top: 10px; }
-        .btn { padding: 8px 15px; background: #1976d2; color: white; text-decoration: none; border-radius: 3px; margin-right: 10px; }
+        .btn { padding: 8px 15px; background: #1976d2; color: white; text-decoration: none; border-radius: 3px; margin-right: 10px; border: none; cursor: pointer; }
         .btn:hover { background: #1565c0; }
         .refresh-btn { background: #4caf50; }
+        .context-btn { background: #ff9800; }
+        .context-btn:hover { background: #f57c00; }
+        .save-btn { background: #4caf50; font-size: 14px; }
+        .save-btn:hover { background: #45a049; }
+        .save-btn:disabled { background: #666; cursor: not-allowed; }
         .no-sessions { text-align: center; color: #666; font-style: italic; }
     </style>
 </head>
@@ -904,6 +1143,7 @@ func (ws *WebServer) handleAdmin(w http.ResponseWriter, r *http.Request) {
                             <div class="session-actions">
                                 <a href="/vibe_${session.user_id}" class="btn" target="_blank">🌐 View Session</a>
                                 <a href="http://localhost:3000?user=${session.user_id}" class="btn" target="_blank">🎨 External Interface</a>
+                                <button onclick="viewContext(${session.user_id})" class="btn context-btn">📄 View Context</button>
                             </div>
                         </div>
                     ` + "`" + `;
@@ -914,6 +1154,48 @@ func (ws *WebServer) handleAdmin(w http.ResponseWriter, r *http.Request) {
             } catch (error) {
                 document.getElementById('sessions-container').innerHTML = 
                     ` + "`<div style='color: red;'>Error loading sessions: ${error.message}</div>`" + `;
+            }
+        }
+
+        async function viewContext(userId) {
+            try {
+                const response = await fetch(` + "`/api/context/${userId}`" + `);
+                if (!response.ok) {
+                    throw new Error(` + "`Context not found: ${response.statusText}`" + `);
+                }
+                
+                const contextData = await response.json();
+                
+                // Создаем новое окно с контекстом
+                const newWindow = window.open('', '_blank', 'width=800,height=600,scrollbars=yes');
+                newWindow.document.write(` + "`" + `
+                    <html>
+                    <head>
+                        <title>VibeCoding Context - User ${userId}</title>
+                        <style>
+                            body { font-family: Monaco, monospace; padding: 20px; background: #1e1e1e; color: #e0e0e0; }
+                            pre { background: #2a2a2a; padding: 15px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; }
+                            .header { background: #ff6b35; color: white; padding: 15px; margin: -20px -20px 20px -20px; }
+                            .section { margin: 20px 0; }
+                            .section-title { color: #ff9800; font-weight: bold; margin-bottom: 10px; }
+                        </style>
+                    </head>
+                    <body>
+                        <div class="header">
+                            <h1>🔥 VibeCoding Context - User ${userId}</h1>
+                            <p>Compressed Project Context JSON</p>
+                        </div>
+                        <div class="section">
+                            <div class="section-title">📄 Context Data:</div>
+                            <pre>${JSON.stringify(contextData, null, 2)}</pre>
+                        </div>
+                    </body>
+                    </html>
+                ` + "`" + `);
+                newWindow.document.close();
+                
+            } catch (error) {
+                alert(` + "`Error loading context: ${error.message}`" + `);
             }
         }
 

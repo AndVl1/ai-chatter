@@ -27,6 +27,8 @@ build: ## Собрать все приложения
 	@echo "$(BLUE)🔨 Building applications...$(NC)"
 	@go build -o ai-chatter cmd/bot/main.go
 	@go build -o notion-mcp-server cmd/notion-mcp-server/main.go
+	@go build -o vibecoding-mcp-server cmd/vibecoding-mcp-server/main.go
+	@go build -o vibecoding-mcp-http-server cmd/vibecoding-mcp-http-server/main.go
 	@go build -o test-custom-mcp cmd/test-custom-mcp/main.go
 	@echo "$(GREEN)✅ Build completed$(NC)"
 
@@ -51,7 +53,7 @@ format: ## Проверить и исправить форматирование
 
 clean: ## Очистить артефакты сборки
 	@echo "$(BLUE)🧹 Cleaning up...$(NC)"
-	@rm -f ai-chatter notion-mcp-server test-custom-mcp
+	@rm -f ai-chatter notion-mcp-server vibecoding-mcp-server vibecoding-mcp-http-server test-custom-mcp
 	@rm -f coverage.out coverage.html *.prof *.log
 	@echo "$(GREEN)✅ Cleanup completed$(NC)"
 
@@ -91,15 +93,27 @@ dev: build ## Запустить в режиме разработки
 	@if [ -f .env ]; then set -a && source .env && set +a; fi
 	@./ai-chatter
 
-mcp-server: build ## Запустить MCP сервер
-	@echo "$(BLUE)🔌 Starting MCP server...$(NC)"
+mcp-server: build ## Запустить MCP сервер (Notion)
+	@echo "$(BLUE)🔌 Starting Notion MCP server...$(NC)"
 	@if [ -f .env ]; then set -a && source .env && set +a; fi
 	@./notion-mcp-server
+
+vibe-mcp: build ## Запустить VibeCoding MCP сервер (stdio)
+	@echo "$(BLUE)🎯 Starting VibeCoding MCP server (stdio)...$(NC)"
+	@if [ -f .env ]; then set -a && source .env && set +a; fi
+	@./vibecoding-mcp-server
+
+vibe-http: build ## Запустить VibeCoding HTTP SSE MCP сервер
+	@echo "$(BLUE)🌐 Starting VibeCoding HTTP SSE MCP server...$(NC)"
+	@if [ -f .env ]; then set -a && source .env && set +a; fi
+	@./vibecoding-mcp-http-server
 
 install: build ## Установить в GOPATH/bin
 	@echo "$(BLUE)📥 Installing to GOPATH/bin...$(NC)"
 	@go install cmd/bot/main.go
 	@go install cmd/notion-mcp-server/main.go
+	@go install cmd/vibecoding-mcp-server/main.go
+	@go install cmd/vibecoding-mcp-http-server/main.go
 	@echo "$(GREEN)✅ Installation completed$(NC)"
 
 docker-single: ## Собрать один Docker образ
