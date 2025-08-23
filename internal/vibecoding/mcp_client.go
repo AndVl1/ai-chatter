@@ -421,6 +421,29 @@ func (m *VibeCodingMCPClient) GetSessionInfo(ctx context.Context, userID int64) 
 	}
 }
 
+// GetAvailableTools получает список доступных MCP тулов
+func (m *VibeCodingMCPClient) GetAvailableTools(ctx context.Context) ([]string, error) {
+	if m.session == nil {
+		return nil, fmt.Errorf("VibeCoding MCP session not connected")
+	}
+
+	log.Printf("🔧 Getting available MCP tools...")
+
+	// Запрашиваем список тулов у MCP сервера
+	toolsResult, err := m.session.ListTools(ctx, &mcp.ListToolsParams{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get MCP tools: %w", err)
+	}
+
+	toolNames := make([]string, 0, len(toolsResult.Tools))
+	for _, tool := range toolsResult.Tools {
+		toolNames = append(toolNames, tool.Name)
+	}
+
+	log.Printf("✅ Found %d MCP tools: %v", len(toolNames), toolNames)
+	return toolNames, nil
+}
+
 // VibeCodingMCPResult результат VibeCoding MCP операции
 type VibeCodingMCPResult struct {
 	Success    bool   `json:"success"`

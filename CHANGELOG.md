@@ -9,6 +9,13 @@ All notable changes to this project will be documented in this file.
   - **Dynamic Tool Discovery**: VibeCoding now uses external MCP client connection like Notion and Gmail
   - **Simplified Session Creation**: Removed `startMCPServerInContainer` from session initialization 
   - **Consistent Architecture**: All MCP services now follow the same pattern for tool registration
+  - **Real-time Tool List**: Added `GetAvailableTools()` method to MCP client for dynamic tool discovery
+  - **Global MCP Access**: Implemented global MCP client access pattern using atomic.Value for thread-safe access
+  - **Context Generation**: Updated JSON/Markdown context generation to use actual MCP tools instead of hardcoded lists
+  - **Smart MCP Availability Detection**: Added `getMCPToolsInfo()` method to check MCP server status before showing tool instructions
+  - **Conditional MCP Instructions**: Context generation now omits MCP tool instructions when server is unavailable
+  - **User-Friendly MCP Status**: Clear messaging when MCP server is not available instead of misleading tool recommendations
+  - **Comprehensive MCP Logic**: Updated all VibeCoding components to respect MCP availability in generated contexts and user messages
 - **SSE Connection Issues**: Fixed persistent connection refused errors to VibeCoding MCP server
   - **Server Cleanup**: Eliminated conflicting MCP server instances running on multiple ports
   - **Proper Port Management**: HTTP SSE server now runs cleanly on port 8082

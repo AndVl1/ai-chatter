@@ -45,6 +45,10 @@ func NewVibeCodingHandler(sender TelegramSender, formatter MessageFormatter, llm
 	mcpClient := NewVibeCodingMCPClient()
 	protocolClient.SetMCPClient(mcpClient)
 
+	// Устанавливаем глобальные переменные для доступа к MCP тулам
+	SetGlobalSessionManager(sessionManager)
+	SetGlobalMCPClient(mcpClient)
+
 	return &VibeCodingHandler{
 		sessionManager:   sessionManager,
 		sender:           sender,
@@ -273,6 +277,16 @@ func (h *VibeCodingHandler) handleContextCommand(ctx context.Context, chatID int
 
 	// Получаем обновленную информацию о LLM-контексте
 	info := session.GetSessionInfo()
+
+	// Проверяем доступность MCP
+	mcpAvailable, _ := session.getMCPToolsInfo()
+	mcpInfo := ""
+	if mcpAvailable {
+		mcpInfo = "\nИспользуйте MCP tools для получения файлов по требованию."
+	} else {
+		mcpInfo = "\n⚠️ MCP сервер недоступен - работайте только с предоставленным контекстом."
+	}
+
 	successMsg := fmt.Sprintf(`[vibecoding] ✅ LLM-контекст проекта обновлен
 
 📊 Статистика:
@@ -281,13 +295,13 @@ func (h *VibeCodingHandler) handleContextCommand(ctx context.Context, chatID int
 Токенов: %d / %d
 Обновлен: %s
 
-📋 Полный LLM-контекст доступен в файле PROJECT_CONTEXT.md
-Используйте MCP tools для получения файлов по требованию.`,
+📋 Полный LLM-контекст доступен в файле PROJECT_CONTEXT.md%s`,
 		info["context_total_files"].(int),
 		info["context_files_count"].(int),
 		info["context_tokens_used"].(int),
 		info["context_tokens_limit"].(int),
-		info["context_generated_at"].(time.Time).Format("15:04:05"))
+		info["context_generated_at"].(time.Time).Format("15:04:05"),
+		mcpInfo)
 
 	h.updateMessage(chatID, sentMsg.MessageID, successMsg)
 	return nil
@@ -953,7 +967,13 @@ func (h *VibeCodingHandler) buildCompressedContext(session *VibeCodingSession) s
 	fileCount := 0
 	for filePath, fileCtx := range ctx.Files {
 		if fileCount >= 10 { // Показываем только первые 10 файлов
-			context.WriteString(fmt.Sprintf("- ... и еще %d файлов (используйте MCP tools для доступа)\n", len(ctx.Files)-10))
+			// Проверяем доступность MCP для рекомендации
+			mcpAvailable, _ := session.getMCPToolsInfo()
+			if mcpAvailable {
+				context.WriteString(fmt.Sprintf("- ... и еще %d файлов (используйте MCP tools для доступа)\n", len(ctx.Files)-10))
+			} else {
+				context.WriteString(fmt.Sprintf("- ... и еще %d файлов (MCP недоступен)\n", len(ctx.Files)-10))
+			}
 			break
 		}
 		fileCount++
@@ -988,23 +1008,32 @@ func (h *VibeCodingHandler) buildCompressedContext(session *VibeCodingSession) s
 		}
 	}
 
-	// Инструкции для работы с MCP
-	context.WriteString("\n## 🔧 MCP Tools Available:\n")
-	context.WriteString("- `vibe_list_files` - получить актуальный список файлов\n")
-	context.WriteString("- `vibe_read_file` - прочитать полное содержимое файла\n")
-	context.WriteString("- `vibe_write_file` - создать или изменить файл\n")
-	context.WriteString("- `vibe_execute_command` - выполнить команду в окружении\n")
-	context.WriteString("- `vibe_run_tests` - запустить тесты проекта\n")
-	context.WriteString("- `vibe_validate_code` - проверить синтаксис кода\n")
-	context.WriteString("- `vibe_get_session_info` - получить информацию о сессии\n\n")
+	// Проверяем доступность MCP для инструкций
+	mcpAvailable, mcpTools := session.getMCPToolsInfo()
+	if mcpAvailable {
+		context.WriteString("\n## 🔧 MCP Tools Available:\n")
+		for _, tool := range mcpTools {
+			context.WriteString(fmt.Sprintf("- `%s`\n", tool))
+		}
+		context.WriteString("\n**ВАЖНО:** Этот контекст генерируется LLM с ограничением токенов. ")
+		context.WriteString("Используйте MCP tools для получения полного содержимого файлов и выполнения операций. ")
+		context.WriteString("Для больших файлов LLM может запросить содержимое через MCP по мере необходимости.\n")
 
-	context.WriteString("**ВАЖНО:** Этот контекст генерируется LLM с ограничением токенов. ")
-	context.WriteString("Используйте MCP tools для получения полного содержимого файлов и выполнения операций. ")
-	context.WriteString("Для больших файлов LLM может запросить содержимое через MCP по мере необходимости.\n")
+		// Добавляем PROJECT_CONTEXT.md в сгенерированные файлы для доступа через MCP
+		if _, exists := session.GeneratedFiles["PROJECT_CONTEXT.md"]; exists {
+			context.WriteString("\n📋 Полный LLM-контекст доступен в файле PROJECT_CONTEXT.md (используйте vibe_read_file)\n")
+		}
+	} else {
+		context.WriteString("\n## ⚠️ MCP Server Not Available\n")
+		context.WriteString("MCP tools are not accessible in this session. Work only with the provided context information.\n\n")
+		context.WriteString("**ВАЖНО:** Этот контекст генерируется LLM с ограничением токенов. ")
+		context.WriteString("MCP сервер недоступен - работайте только с предоставленной информацией о файлах. ")
+		context.WriteString("Для получения дополнительной информации о файлах обратитесь к администратору.\n")
 
-	// Добавляем PROJECT_CONTEXT.md в сгенерированные файлы для доступа через MCP
-	if _, exists := session.GeneratedFiles["PROJECT_CONTEXT.md"]; exists {
-		context.WriteString("\n📋 Полный LLM-контекст доступен в файле PROJECT_CONTEXT.md (используйте vibe_read_file)\n")
+		// PROJECT_CONTEXT.md недоступен без MCP
+		if _, exists := session.GeneratedFiles["PROJECT_CONTEXT.md"]; exists {
+			context.WriteString("\n📋 Полный LLM-контекст сохранен в файле PROJECT_CONTEXT.md (недоступен без MCP)\n")
+		}
 	}
 
 	return context.String()
