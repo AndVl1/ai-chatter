@@ -112,14 +112,16 @@ func (m *MockDockerClient) RemoveContainer(ctx context.Context, containerID stri
 func (d *DockerClient) CreateContainer(ctx context.Context, analysis *CodeAnalysisResult) (string, error) {
 	log.Printf("🐳 Creating Docker container with image: %s", analysis.DockerImage)
 
-	// Создаем контейнер с сетевыми настройками
+	// Создаем контейнер с сетевыми настройками и VibeCoding MCP сервером
 	cmd := exec.CommandContext(ctx, d.dockerPath, "run", "-d", "-i",
 		"--workdir=/workspace",
-		"--network=host",  // Используем bridge сеть для доступа к интернету
+		"--network=host",  // Используем host сеть для доступа к интернету
 		"--dns=8.8.8.8",   // Добавляем Google DNS
 		"--dns=8.8.4.4",   // Резервный DNS
-		"-p", "8080:8080", // Исправлен синтаксис портов
+		"-p", "8080:8080", // Порт для веб-интерфейса
+		"-p", "8090:8090", // Порт для VibeCoding MCP сервера
 		"-e", "DEBIAN_FRONTEND=noninteractive",
+		"-v", "/tmp/vibecoding-mcp:/tmp/vibecoding-mcp", // Монтируем директорию для MCP сокетов
 		analysis.DockerImage, "sh")
 
 	log.Printf("🔧 Docker command: %s", cmd.String())
@@ -547,8 +549,17 @@ func (d *DockerClient) getWorkingDirectory(ctx context.Context, containerID stri
 
 	// Если LLM указала working_dir, проверим её, но приоритет у автоматического определения
 	if analysis.WorkingDir != "" {
-		workspaceBase := "/workspace"
-		targetDir := fmt.Sprintf("%s/%s", workspaceBase, analysis.WorkingDir)
+		// Нормализуем путь - если он уже абсолютный (начинается с /), используем как есть
+		var targetDir string
+		if strings.HasPrefix(analysis.WorkingDir, "/") {
+			targetDir = analysis.WorkingDir
+		} else {
+			workspaceBase := "/workspace"
+			targetDir = fmt.Sprintf("%s/%s", workspaceBase, analysis.WorkingDir)
+		}
+
+		// Убираем дублирующиеся слэши
+		targetDir = strings.ReplaceAll(targetDir, "//", "/")
 
 		checkCmd := exec.CommandContext(ctx, d.dockerPath, "exec", containerID, "test", "-d", targetDir)
 		if err := checkCmd.Run(); err != nil {

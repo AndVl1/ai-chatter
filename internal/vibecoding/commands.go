@@ -45,6 +45,10 @@ func NewVibeCodingHandler(sender TelegramSender, formatter MessageFormatter, llm
 	mcpClient := NewVibeCodingMCPClient()
 	protocolClient.SetMCPClient(mcpClient)
 
+	// Устанавливаем глобальные переменные для доступа к MCP тулам
+	SetGlobalSessionManager(sessionManager)
+	SetGlobalMCPClient(mcpClient)
+
 	return &VibeCodingHandler{
 		sessionManager:   sessionManager,
 		sender:           sender,
@@ -110,6 +114,17 @@ func (h *VibeCodingHandler) HandleArchiveUpload(ctx context.Context, userID, cha
 		return err
 	}
 
+	// Подключаем MCP клиент через HTTP для прямых вызовов от LLM
+	if h.protocolClient != nil && h.protocolClient.mcpClient != nil {
+		log.Printf("🔗 Connecting MCP client for VibeCoding session user %d", userID)
+		if err := h.protocolClient.mcpClient.ConnectHTTP(ctx, h.sessionManager); err != nil {
+			log.Printf("⚠️ Failed to connect MCP client via HTTP: %v. LLM tools may not work properly.", err)
+			// Не прерываем создание сессии, т.к. MCP не критичен для базовой функциональности
+		} else {
+			log.Printf("✅ MCP client connected via HTTP for user %d", userID)
+		}
+	}
+
 	// Настраиваем окружение
 	if err := session.SetupEnvironment(ctx); err != nil {
 		// Очищаем сессию при ошибке
@@ -133,10 +148,11 @@ func (h *VibeCodingHandler) HandleArchiveUpload(ctx context.Context, userID, cha
 Язык: %s
 Команда тестов: %s
 
-🌐 Веб-интерфейс: http://localhost:8080/vibe_%d
+🌐 Веб-интерфейс: http://localhost:3000?user=%d
 
 Доступные команды:
 /vibecoding_info - информация о сессии
+/vibecoding_context - обновить контекст проекта
 /vibecoding_test - запустить тесты
 /vibecoding_generate_tests - сгенерировать тесты
 /vibecoding_auto - автономная работа с проектом
@@ -154,8 +170,8 @@ func (h *VibeCodingHandler) HandleArchiveUpload(ctx context.Context, userID, cha
 
 // HandleVibeCodingCommand обрабатывает команды vibecoding режима
 func (h *VibeCodingHandler) HandleVibeCodingCommand(ctx context.Context, userID, chatID int64, command string) error {
-	session, exists := h.sessionManager.GetSession(userID)
-	if !exists {
+	session := h.sessionManager.GetSession(userID)
+	if session == nil {
 		text := "[vibecoding] ❌ У вас нет активной сессии вайбкодинга. Загрузите архив с кодом для начала."
 		return h.sendMessage(chatID, text)
 	}
@@ -163,6 +179,8 @@ func (h *VibeCodingHandler) HandleVibeCodingCommand(ctx context.Context, userID,
 	switch command {
 	case "/vibecoding_info":
 		return h.handleInfoCommand(chatID, session)
+	case "/vibecoding_context":
+		return h.handleContextCommand(ctx, chatID, session)
 	case "/vibecoding_test":
 		return h.handleTestCommand(ctx, chatID, session)
 	case "/vibecoding_generate_tests":
@@ -179,8 +197,8 @@ func (h *VibeCodingHandler) HandleVibeCodingCommand(ctx context.Context, userID,
 
 // HandleVibeCodingMessage обрабатывает текстовые сообщения в vibecoding режиме
 func (h *VibeCodingHandler) HandleVibeCodingMessage(ctx context.Context, userID, chatID int64, messageText string) error {
-	session, exists := h.sessionManager.GetSession(userID)
-	if !exists {
+	session := h.sessionManager.GetSession(userID)
+	if session == nil {
 		return nil // Не наша задача если нет сессии
 	}
 
@@ -226,7 +244,67 @@ func (h *VibeCodingHandler) handleInfoCommand(chatID int64, session *VibeCodingS
 		info["test_command"].(string),
 		info["container_id"].(string))
 
+	// Добавляем информацию о контексте
+	if contextAvailable, exists := info["context_available"].(bool); exists && contextAvailable {
+		infoMsg += fmt.Sprintf(`
+
+📋 Контекст проекта: доступен
+Сгенерирован: %s
+Файлов в контексте: %d
+Полный контекст: PROJECT_CONTEXT.md`,
+			info["context_generated_at"].(time.Time).Format("15:04:05"),
+			info["context_files_count"].(int))
+	} else {
+		infoMsg += "\n\n📋 Контекст проекта: не доступен"
+	}
+
 	return h.sendMessage(chatID, infoMsg)
+}
+
+// handleContextCommand обрабатывает команду обновления контекста проекта
+func (h *VibeCodingHandler) handleContextCommand(ctx context.Context, chatID int64, session *VibeCodingSession) error {
+	text := "[vibecoding] 📋 Обновление контекста проекта..."
+	msg := tgbotapi.NewMessage(chatID, h.formatter.EscapeText(text))
+	msg.ParseMode = h.formatter.ParseModeValue()
+	sentMsg, _ := h.sender.Send(msg)
+
+	// Обновляем контекст
+	if err := session.RefreshProjectContext(); err != nil {
+		errorMsg := fmt.Sprintf("[vibecoding] ❌ Ошибка обновления контекста: %s", err.Error())
+		h.updateMessage(chatID, sentMsg.MessageID, errorMsg)
+		return err
+	}
+
+	// Получаем обновленную информацию о LLM-контексте
+	info := session.GetSessionInfo()
+
+	// Проверяем доступность MCP
+	mcpAvailable, _ := session.getMCPToolsInfo()
+	mcpInfo := ""
+	if mcpAvailable {
+		mcpInfo = "\nИспользуйте MCP tools для получения файлов по требованию."
+	} else {
+		mcpInfo = "\n⚠️ MCP сервер недоступен - работайте только с предоставленным контекстом."
+	}
+
+	successMsg := fmt.Sprintf(`[vibecoding] ✅ LLM-контекст проекта обновлен
+
+📊 Статистика:
+Всего файлов: %d
+Ключевых элементов: %d
+Токенов: %d / %d
+Обновлен: %s
+
+📋 Полный LLM-контекст доступен в файле PROJECT_CONTEXT.md%s`,
+		info["context_total_files"].(int),
+		info["context_files_count"].(int),
+		info["context_tokens_used"].(int),
+		info["context_tokens_limit"].(int),
+		info["context_generated_at"].(time.Time).Format("15:04:05"),
+		mcpInfo)
+
+	h.updateMessage(chatID, sentMsg.MessageID, successMsg)
+	return nil
 }
 
 // handleTestCommand обрабатывает команду запуска тестов с автоматическим исправлением при неудаче
@@ -338,8 +416,8 @@ func (h *VibeCodingHandler) handleGenerateTestsCommand(ctx context.Context, chat
 	msg.ParseMode = h.formatter.ParseModeValue()
 	sentMsg, _ := h.sender.Send(msg)
 
-	// Генерируем тесты через LLM
-	tests, err := h.generateTests(ctx, session)
+	// Генерируем тесты через LLM с детальным логированием
+	tests, err := h.generateTestsWithProgress(ctx, session, chatID, sentMsg.MessageID)
 	if err != nil {
 		errorMsg := fmt.Sprintf("[vibecoding] ❌ Ошибка генерации тестов: %s", err.Error())
 		h.updateMessage(chatID, sentMsg.MessageID, errorMsg)
@@ -388,6 +466,16 @@ func (h *VibeCodingHandler) handleEndCommand(ctx context.Context, chatID int64, 
 		return err
 	}
 
+	// Отключаем MCP клиент перед завершением сессии
+	if h.protocolClient != nil && h.protocolClient.mcpClient != nil {
+		log.Printf("🔌 Disconnecting MCP client for user %d", userID)
+		if err := h.protocolClient.mcpClient.Close(); err != nil {
+			log.Printf("⚠️ Error disconnecting MCP client: %v", err)
+		} else {
+			log.Printf("✅ MCP client disconnected for user %d", userID)
+		}
+	}
+
 	// Завершаем сессию и очищаем состояние ожидания
 	duration := time.Since(session.StartTime).Round(time.Second)
 	delete(h.awaitingAutoTask, userID) // Очищаем состояние ожидания задачи
@@ -429,8 +517,8 @@ func (h *VibeCodingHandler) handleAutoCommand(ctx context.Context, chatID int64,
 
 // HandleAutoWorkRequest обрабатывает запрос на автономную работу с конкретной задачей
 func (h *VibeCodingHandler) HandleAutoWorkRequest(ctx context.Context, userID, chatID int64, task string) error {
-	session, exists := h.sessionManager.GetSession(userID)
-	if !exists {
+	session := h.sessionManager.GetSession(userID)
+	if session == nil {
 		text := "[vibecoding] ❌ У вас нет активной сессии вайбкодинга."
 		return h.sendMessage(chatID, text)
 	}
@@ -441,6 +529,15 @@ func (h *VibeCodingHandler) HandleAutoWorkRequest(ctx context.Context, userID, c
 	sentMsg, _ := h.sender.Send(msg)
 
 	// Создаем запрос для автономной работы
+	options := map[string]interface{}{
+		"user_id": userID,
+	}
+
+	// Добавляем сжатый контекст проекта если доступен
+	if session.Context != nil {
+		options["project_context"] = session.Context
+	}
+
 	request := VibeCodingRequest{
 		Action: "autonomous_work",
 		Context: VibeCodingContext{
@@ -450,10 +547,8 @@ func (h *VibeCodingHandler) HandleAutoWorkRequest(ctx context.Context, userID, c
 			GeneratedFiles:  session.GeneratedFiles,
 			SessionDuration: time.Since(session.StartTime).Round(time.Second).String(),
 		},
-		Query: task,
-		Options: map[string]interface{}{
-			"user_id": userID,
-		},
+		Query:   task,
+		Options: options,
 	}
 
 	log.Printf("🤖 Starting autonomous work for user %d: %s", userID, task)
@@ -605,7 +700,103 @@ func (h *VibeCodingHandler) generateCodeResponseLegacy(ctx context.Context, sess
 	return resp.Content, nil
 }
 
-// generateTests генерирует тесты для проекта через JSON протокол с валидацией и исправлением
+// generateTestsWithProgress генерирует тесты с детальным логированием в Telegram
+func (h *VibeCodingHandler) generateTestsWithProgress(ctx context.Context, session *VibeCodingSession, chatID int64, messageID int) (map[string]string, error) {
+	maxAttempts := 5
+	var lastError error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// Обновляем сообщение с прогрессом
+		progressMsg := fmt.Sprintf("[vibecoding] 🧠 Генерация тестов... (попытка %d/%d)", attempt, maxAttempts)
+		h.updateMessage(chatID, messageID, progressMsg)
+
+		log.Printf("🧪 Test generation attempt %d/%d", attempt, maxAttempts)
+
+		// Генерируем тесты
+		tests, err := h.generateTestsOnce(ctx, session, attempt)
+		if err != nil {
+			lastError = fmt.Errorf("test generation failed: %w", err)
+			log.Printf("❌ Test generation attempt %d failed: %v", attempt, err)
+
+			// Обновляем сообщение об ошибке
+			errorMsg := fmt.Sprintf("[vibecoding] ⚠️ Попытка %d/%d не удалась: %s", attempt, maxAttempts, err.Error())
+			h.updateMessage(chatID, messageID, errorMsg)
+			time.Sleep(2 * time.Second) // Дать пользователю прочитать ошибку
+			continue
+		}
+
+		if len(tests) == 0 {
+			lastError = fmt.Errorf("no tests generated")
+			log.Printf("⚠️ No tests generated on attempt %d", attempt)
+
+			// Обновляем сообщение
+			h.updateMessage(chatID, messageID, fmt.Sprintf("[vibecoding] ⚠️ Попытка %d/%d: тесты не сгенерированы", attempt, maxAttempts))
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// Валидируем сгенерированные тесты
+		validationMsg := fmt.Sprintf("[vibecoding] 🔍 Валидация %d тестовых файлов... (попытка %d/%d)", len(tests), attempt, maxAttempts)
+		h.updateMessage(chatID, messageID, validationMsg)
+		log.Printf("🔍 Validating %d generated test files", len(tests))
+
+		validationResult, err := h.validateGeneratedTests(ctx, session, tests)
+		if err != nil {
+			log.Printf("❌ Test validation failed on attempt %d: %v", attempt, err)
+			lastError = err
+
+			// Обновляем сообщение об ошибке валидации
+			h.updateMessage(chatID, messageID, fmt.Sprintf("[vibecoding] ❌ Валидация не прошла (попытка %d/%d): %s", attempt, maxAttempts, err.Error()))
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if validationResult.Success {
+			log.Printf("✅ All tests passed validation on attempt %d", attempt)
+
+			// Обновляем сообщение об успехе
+			successMsg := fmt.Sprintf("[vibecoding] ✅ Тесты успешно сгенерированы и проверены (попытка %d/%d)", attempt, maxAttempts)
+			h.updateMessage(chatID, messageID, successMsg)
+
+			return validationResult.ValidTests, nil
+		}
+
+		// Если валидация не прошла, пытаемся исправить тесты
+		if attempt < maxAttempts {
+			log.Printf("🔧 Attempting to fix test issues on attempt %d", attempt)
+
+			// Обновляем сообщение об исправлении
+			fixMsg := fmt.Sprintf("[vibecoding] 🔧 Исправление ошибок тестов... (попытка %d/%d)", attempt, maxAttempts)
+			h.updateMessage(chatID, messageID, fixMsg)
+
+			fixedTests, err := h.fixTestIssues(ctx, session, tests, validationResult)
+			if err != nil {
+				log.Printf("⚠️ Could not fix test issues: %v", err)
+				lastError = fmt.Errorf("test fixing failed: %w", err)
+
+				h.updateMessage(chatID, messageID, fmt.Sprintf("[vibecoding] ⚠️ Не удалось исправить ошибки (попытка %d/%d)", attempt, maxAttempts))
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			// Используем исправленные тесты для следующей итерации
+			tests = fixedTests
+
+			// Обновляем сообщение об успешном исправлении
+			h.updateMessage(chatID, messageID, fmt.Sprintf("[vibecoding] ✅ Ошибки исправлены, повтор валидации... (попытка %d/%d)", attempt, maxAttempts))
+		} else {
+			lastError = fmt.Errorf("test validation failed after %d attempts", maxAttempts)
+		}
+	}
+
+	// Если все попытки неудачны, возвращаем ошибку
+	log.Printf("❌ Test generation and validation failed after %d attempts", maxAttempts)
+	finalErrorMsg := fmt.Sprintf("[vibecoding] ❌ Не удалось сгенерировать тесты после %d попыток: %s", maxAttempts, lastError.Error())
+	h.updateMessage(chatID, messageID, finalErrorMsg)
+
+	return nil, fmt.Errorf("test generation failed after %d attempts: %w", maxAttempts, lastError)
+}
+
+// generateTests генерирует тесты для проекта через JSON протокол с валидацией и исправлением (без Telegram updates)
 func (h *VibeCodingHandler) generateTests(ctx context.Context, session *VibeCodingSession) (map[string]string, error) {
 	maxAttempts := 5
 	var lastError error
@@ -665,8 +856,17 @@ func (h *VibeCodingHandler) generateTests(ctx context.Context, session *VibeCodi
 
 // generateTestsOnce выполняет однократную генерацию тестов
 func (h *VibeCodingHandler) generateTestsOnce(ctx context.Context, session *VibeCodingSession, attempt int) (map[string]string, error) {
-	// Создаем запрос через JSON протокол
-	query := fmt.Sprintf("Generate comprehensive tests for this %s project. Include unit tests and integration tests where appropriate. Follow best practices and testing conventions for %s.", session.Analysis.Language, session.Analysis.Language)
+	// Сначала генерируем специализированный промпт для написания тестов
+	testPrompt, err := h.generateTestWritingPrompt(ctx, session)
+	if err != nil {
+		log.Printf("⚠️ Failed to generate test writing prompt: %v, using default", err)
+		testPrompt = fmt.Sprintf("Generate comprehensive tests for this %s project. Include unit tests and integration tests where appropriate. Follow best practices and testing conventions for %s.", session.Analysis.Language, session.Analysis.Language)
+	}
+
+	log.Printf("🎯 Generated specialized test writing prompt for %s", session.Analysis.Language)
+
+	// Создаем запрос через JSON протокол с специализированным промптом
+	query := testPrompt
 
 	if attempt > 1 {
 		query += fmt.Sprintf(" This is attempt %d - ensure tests are syntactically correct and runnable.", attempt)
@@ -711,7 +911,14 @@ func (h *VibeCodingHandler) generateTestsOnce(ctx context.Context, session *Vibe
 
 // buildProjectContext строит контекст проекта для LLM
 func (h *VibeCodingHandler) buildProjectContext(session *VibeCodingSession) string {
+	// Используем сжатый контекст если доступен
+	if session.Context != nil {
+		return h.buildCompressedContext(session)
+	}
+
+	// Fallback к старому методу если контекст не сгенерирован
 	var context strings.Builder
+	context.WriteString("⚠️ Project context not available, using file excerpts:\n\n")
 
 	for filename, content := range session.Files {
 		context.WriteString(fmt.Sprintf("\n=== %s ===\n", filename))
@@ -724,6 +931,109 @@ func (h *VibeCodingHandler) buildProjectContext(session *VibeCodingSession) stri
 			context.WriteString(content)
 		}
 		context.WriteString("\n")
+	}
+
+	return context.String()
+}
+
+// buildCompressedContext строит сжатый LLM-генерируемый контекст для LLM
+func (h *VibeCodingHandler) buildCompressedContext(session *VibeCodingSession) string {
+	var context strings.Builder
+
+	ctx := session.Context
+
+	context.WriteString("# LLM-Generated Compressed Project Context\n\n")
+	context.WriteString(fmt.Sprintf("**Project:** %s | **Language:** %s | **Files:** %d | **Tokens:** %d/%d\n",
+		ctx.ProjectName, ctx.Language, ctx.TotalFiles, ctx.TokensUsed, ctx.TokensLimit))
+
+	if ctx.Description != "" {
+		context.WriteString(fmt.Sprintf("**Description:** %s\n", ctx.Description))
+	}
+	context.WriteString("\n")
+
+	// Краткая структура проекта
+	context.WriteString("## Project Structure:\n")
+	for i, dir := range ctx.Structure.Directories {
+		if i >= 5 { // Показываем только топ-5 директорий
+			context.WriteString(fmt.Sprintf("- ... и еще %d директорий\n", len(ctx.Structure.Directories)-5))
+			break
+		}
+		context.WriteString(fmt.Sprintf("- **%s** (%d files) - %s\n", dir.Path, dir.FileCount, dir.Purpose))
+	}
+	context.WriteString("\n")
+
+	// LLM-сгенерированные описания файлов
+	context.WriteString("## Key Files & LLM-Generated Descriptions:\n")
+	fileCount := 0
+	for filePath, fileCtx := range ctx.Files {
+		if fileCount >= 10 { // Показываем только первые 10 файлов
+			// Проверяем доступность MCP для рекомендации
+			mcpAvailable, _ := session.getMCPToolsInfo()
+			if mcpAvailable {
+				context.WriteString(fmt.Sprintf("- ... и еще %d файлов (используйте MCP tools для доступа)\n", len(ctx.Files)-10))
+			} else {
+				context.WriteString(fmt.Sprintf("- ... и еще %d файлов (MCP недоступен)\n", len(ctx.Files)-10))
+			}
+			break
+		}
+		fileCount++
+
+		context.WriteString(fmt.Sprintf("\n### %s (%s, %d bytes, %d tokens)\n", filePath, fileCtx.Type, fileCtx.Size, fileCtx.TokensUsed))
+
+		if fileCtx.Summary != "" {
+			context.WriteString(fmt.Sprintf("**Summary:** %s\n", fileCtx.Summary))
+		}
+
+		if fileCtx.Purpose != "" {
+			context.WriteString(fmt.Sprintf("**Purpose:** %s\n", fileCtx.Purpose))
+		}
+
+		// Показываем ключевые элементы (LLM-определенные)
+		if len(fileCtx.KeyElements) > 0 {
+			context.WriteString(fmt.Sprintf("**Key Elements (%d):** ", len(fileCtx.KeyElements)))
+			elementNames := make([]string, 0, len(fileCtx.KeyElements))
+			for j, element := range fileCtx.KeyElements {
+				if j >= 5 { // Показываем только первые 5 элементов
+					elementNames = append(elementNames, "...")
+					break
+				}
+				elementNames = append(elementNames, element)
+			}
+			context.WriteString(strings.Join(elementNames, ", ") + "\n")
+		}
+
+		// Зависимости файла
+		if len(fileCtx.Dependencies) > 0 {
+			context.WriteString(fmt.Sprintf("**Dependencies:** %s\n", strings.Join(fileCtx.Dependencies, ", ")))
+		}
+	}
+
+	// Проверяем доступность MCP для инструкций
+	mcpAvailable, mcpTools := session.getMCPToolsInfo()
+	if mcpAvailable {
+		context.WriteString("\n## 🔧 MCP Tools Available:\n")
+		for _, tool := range mcpTools {
+			context.WriteString(fmt.Sprintf("- `%s`\n", tool))
+		}
+		context.WriteString("\n**ВАЖНО:** Этот контекст генерируется LLM с ограничением токенов. ")
+		context.WriteString("Используйте MCP tools для получения полного содержимого файлов и выполнения операций. ")
+		context.WriteString("Для больших файлов LLM может запросить содержимое через MCP по мере необходимости.\n")
+
+		// Добавляем PROJECT_CONTEXT.md в сгенерированные файлы для доступа через MCP
+		if _, exists := session.GeneratedFiles["PROJECT_CONTEXT.md"]; exists {
+			context.WriteString("\n📋 Полный LLM-контекст доступен в файле PROJECT_CONTEXT.md (используйте vibe_read_file)\n")
+		}
+	} else {
+		context.WriteString("\n## ⚠️ MCP Server Not Available\n")
+		context.WriteString("MCP tools are not accessible in this session. Work only with the provided context information.\n\n")
+		context.WriteString("**ВАЖНО:** Этот контекст генерируется LLM с ограничением токенов. ")
+		context.WriteString("MCP сервер недоступен - работайте только с предоставленной информацией о файлах. ")
+		context.WriteString("Для получения дополнительной информации о файлах обратитесь к администратору.\n")
+
+		// PROJECT_CONTEXT.md недоступен без MCP
+		if _, exists := session.GeneratedFiles["PROJECT_CONTEXT.md"]; exists {
+			context.WriteString("\n📋 Полный LLM-контекст сохранен в файле PROJECT_CONTEXT.md (недоступен без MCP)\n")
+		}
 	}
 
 	return context.String()
@@ -835,9 +1145,9 @@ type TestLLMValidationIssue struct {
 	LineNumber int    `json:"line_number,omitempty"`
 }
 
-// validateGeneratedTests валидирует сгенерированные тесты
+// validateGeneratedTests валидирует сгенерированные тесты с обязательным выполнением
 func (h *VibeCodingHandler) validateGeneratedTests(ctx context.Context, session *VibeCodingSession, tests map[string]string) (*TestValidationResult, error) {
-	log.Printf("🔍 Starting validation of %d test files", len(tests))
+	log.Printf("🔍 Starting strict validation of %d test files", len(tests))
 
 	// Сначала валидируем тесты через LLM
 	llmValidatedTests, err := h.validateTestsWithLLM(ctx, session, tests)
@@ -847,7 +1157,7 @@ func (h *VibeCodingHandler) validateGeneratedTests(ctx context.Context, session 
 		llmValidatedTests = tests
 	}
 
-	log.Printf("✅ LLM validation complete, proceeding with %d test files", len(llmValidatedTests))
+	log.Printf("✅ LLM validation complete, proceeding with execution validation of %d test files", len(llmValidatedTests))
 
 	result := &TestValidationResult{
 		Success:    true,
@@ -869,31 +1179,134 @@ func (h *VibeCodingHandler) validateGeneratedTests(ctx context.Context, session 
 		return nil, fmt.Errorf("failed to copy test files to container: %w", err)
 	}
 
-	// Выполняем валидацию для каждого тестового файла
+	// КРИТИЧНО: выполняем реальную валидацию каждого тестового файла
 	for filename, content := range llmValidatedTests {
-		log.Printf("🔍 Validating test file: %s", filename)
+		log.Printf("🔍 Executing real validation for test file: %s", filename)
 
-		// Пытаемся запустить тесты (синтаксические ошибки будут обнаружены при выполнении)
-		runOK, runIssue := h.validateTestExecution(ctx, session, filename)
-		if !runOK {
+		// Выполняем ФАКТИЧЕСКОЕ выполнение тестов для валидации
+		executionOK, executionIssue := h.executeTestForValidation(ctx, session, filename)
+		if !executionOK {
 			result.Success = false
-			result.Issues = append(result.Issues, *runIssue)
-			log.Printf("⚠️ Test execution validation failed for %s: %s", filename, runIssue.Description)
-			// Файл добавляем в valid_tests, но с пометкой о проблемах выполнения
+			result.Issues = append(result.Issues, *executionIssue)
+			log.Printf("❌ Test execution validation FAILED for %s: %s", filename, executionIssue.Description)
+
+			// НЕ добавляем файл в valid_tests если он не выполняется
+			continue
 		}
 
-		// Добавляем файл в валидные тесты (даже если есть проблемы с выполнением)
+		// Добавляем файл в валидные тесты ТОЛЬКО если он действительно выполняется
 		result.ValidTests[filename] = content
-		log.Printf("✅ Test file %s validated (execution: %v)", filename, runOK)
+		log.Printf("✅ Test file %s PASSED execution validation", filename)
 	}
 
-	log.Printf("🔍 Validation complete: %d valid files, %d issues found", len(result.ValidTests), len(result.Issues))
+	log.Printf("🔍 Strict validation complete: %d valid files, %d issues found", len(result.ValidTests), len(result.Issues))
+
+	// Если НИ ОДИН тест не прошел валидацию - это ошибка
+	if len(result.ValidTests) == 0 && len(llmValidatedTests) > 0 {
+		result.Success = false
+		log.Printf("❌ CRITICAL: No tests passed execution validation")
+	}
+
 	return result, nil
+}
+
+// executeTestForValidation выполняет фактическое тестирование для строгой валидации
+func (h *VibeCodingHandler) executeTestForValidation(ctx context.Context, session *VibeCodingSession, filename string) (bool, *TestIssue) {
+	log.Printf("🧪 Executing test file for validation: %s", filename)
+
+	// Используем команды тестирования из LLM анализа
+	if len(session.Analysis.TestCommands) == 0 {
+		log.Printf("❌ No test commands provided by LLM analysis for validation of %s", filename)
+		return false, &TestIssue{
+			Filename:    filename,
+			Type:        "configuration_error",
+			Description: "No test commands available for validation",
+		}
+	}
+
+	// Определяем подходящую команду тестирования через LLM
+	var command string
+	for _, testCmd := range session.Analysis.TestCommands {
+		// Проверяем через LLM, подходит ли команда для данного файла
+		if h.isTestCommandSuitableForFile(ctx, testCmd, filename, session.Analysis.Language) {
+			command = h.adaptTestCommandForFile(ctx, testCmd, filename, session.Analysis.Language)
+			break
+		}
+	}
+
+	// Если не нашли подходящую команду, используем первую и адаптируем через LLM
+	if command == "" && len(session.Analysis.TestCommands) > 0 {
+		command = h.adaptTestCommandForFile(ctx, session.Analysis.TestCommands[0], filename, session.Analysis.Language)
+	}
+
+	if command == "" {
+		log.Printf("❌ No suitable test command found for validation of %s", filename)
+		return false, &TestIssue{
+			Filename:    filename,
+			Type:        "configuration_error",
+			Description: "No suitable test command found",
+		}
+	}
+
+	log.Printf("🧪 Executing validation command for %s: %s", filename, command)
+
+	// КРИТИЧНО: выполняем команду тестирования и строго проверяем результат
+	result, err := session.ExecuteCommand(ctx, command)
+	if err != nil {
+		log.Printf("❌ Test execution FAILED for %s: %v", filename, err)
+		return false, &TestIssue{
+			Filename:    filename,
+			Type:        "execution_error",
+			Description: fmt.Sprintf("Test execution failed: %v", err),
+		}
+	}
+
+	// СТРОГАЯ проверка: тесты должны выполняться БЕЗ ошибок
+	if result.ExitCode != 0 {
+		log.Printf("❌ Test validation FAILED for %s with exit code %d", filename, result.ExitCode)
+
+		// Анализируем тип ошибки для более точной диагностики
+		errorType := "test_failure"
+		if strings.Contains(result.Output, "SyntaxError") ||
+			strings.Contains(result.Output, "IndentationError") ||
+			strings.Contains(result.Output, "compilation error") ||
+			strings.Contains(result.Output, "syntax error") {
+			errorType = "syntax_error"
+		} else if strings.Contains(result.Output, "ModuleNotFoundError") ||
+			strings.Contains(result.Output, "cannot find module") ||
+			strings.Contains(result.Output, "ImportError") ||
+			strings.Contains(result.Output, "package") && strings.Contains(result.Output, "not found") {
+			errorType = "missing_dependency"
+		} else if strings.Contains(result.Output, "NameError") ||
+			strings.Contains(result.Output, "AttributeError") ||
+			strings.Contains(result.Output, "is not defined") {
+			errorType = "invalid_reference"
+		}
+
+		return false, &TestIssue{
+			Filename:    filename,
+			Type:        errorType,
+			Description: fmt.Sprintf("Test failed with exit code %d: %s", result.ExitCode, result.Output),
+		}
+	}
+
+	// Дополнительная проверка: убеждаемся что тесты фактически выполнились
+	if !result.Success {
+		log.Printf("❌ Test execution marked as unsuccessful for %s", filename)
+		return false, &TestIssue{
+			Filename:    filename,
+			Type:        "execution_error",
+			Description: fmt.Sprintf("Test execution unsuccessful: %s", result.Output),
+		}
+	}
+
+	log.Printf("✅ Test file %s PASSED validation execution", filename)
+	return true, nil
 }
 
 // Note: validateTestSyntax метод удален - синтаксические ошибки обнаруживаются при выполнении тестов
 
-// validateTestExecution проверяет выполнимость тестов используя команды из LLM анализа
+// validateTestExecution проверяет выполнимость тестов используя команды из LLM анализа (устаревший, заменен на executeTestForValidation)
 func (h *VibeCodingHandler) validateTestExecution(ctx context.Context, session *VibeCodingSession, filename string) (bool, *TestIssue) {
 	// Используем команды тестирования из LLM анализа
 	if len(session.Analysis.TestCommands) == 0 {
@@ -1166,8 +1579,15 @@ func (h *VibeCodingHandler) validateTestsWithLLM(ctx context.Context, session *V
 	systemPrompt := `You are an expert test reviewer and validator. Your task is to analyze generated test files and ensure they are:
 1. Syntactically correct
 2. Follow best practices for the given programming language
-3. Actually test the code they're supposed to test
+3. Actually test the code they're supposed to test (CRITICAL: only test functions/classes that actually exist)
 4. Are runnable and don't have obvious errors
+5. Don't test non-existent functions, classes, or methods
+
+CRITICAL VALIDATION RULES:
+- Only test functions and classes that are explicitly listed in the "AVAILABLE FUNCTIONS AND CLASSES" section
+- Remove or fix any tests that try to test non-existent functions or classes
+- Ensure imports correspond to actual project files
+- Verify that method calls exist on the classes being tested
 
 Respond with a JSON object matching this exact schema:
 
@@ -1192,30 +1612,39 @@ Respond with a JSON object matching this exact schema:
 Guidelines:
 - Use "ok" if tests are good as-is
 - Use "needs_fix" if tests have issues but can be fixed
-- Use "error" if tests are completely broken
+- Use "error" if tests are completely broken or test non-existent code
 - Only include "fixed_tests" if status is "needs_fix" and you can fix them
 - Be specific about issues and fixes
-- Remove any test files that are unnecessary or cannot be fixed`
+- Remove any test files that are unnecessary or cannot be fixed
+- Flag tests that reference functions/classes not in the available list as "critical" issues`
 
-	// Подготавливаем контекст для валидации
+	// Подготавливаем детальный контекст для валидации
 	userPrompt := fmt.Sprintf(`Please validate these test files for a %s project:
 
 PROJECT CONTEXT:
 Language: %s
 Project: %s
 
-PROJECT FILES (for context):
 %s
 
 TEST FILES TO VALIDATE:
 %s
 
-Check for syntax errors, logical issues, missing imports, incorrect assertions, and ensure tests actually test the intended functionality.`,
+CRITICAL VALIDATION REQUIREMENTS:
+1. Every function/method call in tests MUST exist in the project files
+2. Every class instantiation MUST reference existing classes
+3. Every import MUST correspond to actual project files
+4. No tests should reference non-existent code elements
+5. All syntax must be correct and runnable
+6. Test structure must follow %s testing conventions
+
+Carefully cross-reference all test code against the available functions and classes listed above.`,
 		session.Analysis.Language,
 		session.Analysis.Language,
 		session.ProjectName,
 		h.formatProjectFilesForValidation(session.Files),
-		h.formatTestFilesForValidation(tests))
+		h.formatTestFilesForValidation(tests),
+		session.Analysis.Language)
 
 	messages := []llm.Message{
 		{Role: "system", Content: systemPrompt},
@@ -1298,8 +1727,14 @@ Check for syntax errors, logical issues, missing imports, incorrect assertions, 
 // formatProjectFilesForValidation форматирует файлы проекта для контекста валидации
 func (h *VibeCodingHandler) formatProjectFilesForValidation(files map[string]string) string {
 	var result strings.Builder
+
+	// Сначала создаем обзор всех функций и классов
+	result.WriteString("AVAILABLE FUNCTIONS AND CLASSES:\n")
+	result.WriteString(h.extractFunctionsAndClasses(files))
+	result.WriteString("\n\nPROJECT FILES (sample content):\n")
+
 	fileCount := 0
-	maxFiles := 5 // Ограничиваем количество файлов для контекста
+	maxFiles := 8 // Увеличиваем лимит файлов
 
 	for filename, content := range files {
 		if fileCount >= maxFiles {
@@ -1308,8 +1743,8 @@ func (h *VibeCodingHandler) formatProjectFilesForValidation(files map[string]str
 		}
 
 		result.WriteString(fmt.Sprintf("=== %s ===\n", filename))
-		if len(content) > 800 {
-			result.WriteString(content[:800])
+		if len(content) > 1500 { // Увеличиваем лимит символов
+			result.WriteString(content[:1500])
 			result.WriteString("\n... (truncated)\n")
 		} else {
 			result.WriteString(content)
@@ -1319,6 +1754,106 @@ func (h *VibeCodingHandler) formatProjectFilesForValidation(files map[string]str
 	}
 
 	return result.String()
+}
+
+// extractFunctionsAndClasses извлекает список функций и классов из файлов проекта
+func (h *VibeCodingHandler) extractFunctionsAndClasses(files map[string]string) string {
+	var result strings.Builder
+
+	for filename, content := range files {
+		lines := strings.Split(content, "\n")
+		var functions, classes []string
+
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+
+			// Python/Go function detection
+			if strings.HasPrefix(trimmed, "def ") || strings.HasPrefix(trimmed, "func ") {
+				funcName := h.extractNameFromDefinition(trimmed)
+				if funcName != "" {
+					functions = append(functions, funcName)
+				}
+			}
+
+			// Python/Go/Java class detection
+			if strings.HasPrefix(trimmed, "class ") || strings.HasPrefix(trimmed, "type ") && strings.Contains(trimmed, "struct") {
+				className := h.extractNameFromDefinition(trimmed)
+				if className != "" {
+					classes = append(classes, className)
+				}
+			}
+		}
+
+		if len(functions) > 0 || len(classes) > 0 {
+			result.WriteString(fmt.Sprintf("File: %s\n", filename))
+			if len(classes) > 0 {
+				result.WriteString(fmt.Sprintf("  Classes: %s\n", strings.Join(classes, ", ")))
+			}
+			if len(functions) > 0 {
+				result.WriteString(fmt.Sprintf("  Functions: %s\n", strings.Join(functions, ", ")))
+			}
+		}
+	}
+
+	return result.String()
+}
+
+// extractNameFromDefinition извлекает имя функции или класса из строки определения
+func (h *VibeCodingHandler) extractNameFromDefinition(line string) string {
+	parts := strings.Fields(line)
+	if len(parts) < 2 {
+		return ""
+	}
+
+	// Для "def function_name(" или "func functionName("
+	if parts[0] == "def" {
+		name := parts[1]
+		if idx := strings.Index(name, "("); idx != -1 {
+			return name[:idx]
+		}
+		return name
+	}
+
+	// Для Go функций: "func functionName(" или "func (receiver) MethodName("
+	if parts[0] == "func" {
+		if len(parts) >= 2 && strings.HasPrefix(parts[1], "(") {
+			// Go метод: func (c *Config) GetName() string {
+			// Ищем имя метода после закрывающей скобки
+			for i := 2; i < len(parts); i++ {
+				name := parts[i]
+				if idx := strings.Index(name, "("); idx != -1 {
+					return name[:idx]
+				}
+				if name != "" && !strings.Contains(name, ")") {
+					return name
+				}
+			}
+		} else {
+			// Go функция: func functionName() {
+			name := parts[1]
+			if idx := strings.Index(name, "("); idx != -1 {
+				return name[:idx]
+			}
+			return name
+		}
+	}
+
+	// Для "class ClassName:" или "type StructName struct"
+	if parts[0] == "class" || parts[0] == "type" {
+		name := parts[1]
+		if idx := strings.Index(name, "("); idx != -1 {
+			return name[:idx]
+		}
+		if idx := strings.Index(name, ":"); idx != -1 {
+			return name[:idx]
+		}
+		if idx := strings.Index(name, " "); idx != -1 {
+			return name[:idx]
+		}
+		return name
+	}
+
+	return ""
 }
 
 // formatTestFilesForValidation форматирует тестовые файлы для валидации
@@ -1565,4 +2100,190 @@ Please determine if this filename follows test file naming conventions for %s.`,
 		filename, testFileResponse.IsTestFile, testFileResponse.Confidence, testFileResponse.Reasoning)
 
 	return testFileResponse.IsTestFile
+}
+
+// generateTestWritingPrompt генерирует специализированный промпт для написания тестов через LLM
+func (h *VibeCodingHandler) generateTestWritingPrompt(ctx context.Context, session *VibeCodingSession) (string, error) {
+	log.Printf("🎯 Generating specialized test writing prompt for %s project", session.Analysis.Language)
+
+	systemPrompt := `You are an expert test writing advisor. Your task is to create a detailed, language-specific prompt for writing high-quality tests that will definitely pass execution.
+
+Respond with a JSON object matching this exact schema:
+{
+  "test_prompt": "detailed test writing instructions",
+  "key_rules": ["rule1", "rule2", "rule3"],
+  "testing_framework": "recommended framework",
+  "file_naming": "naming convention",
+  "best_practices": ["practice1", "practice2"],
+  "common_pitfalls": ["pitfall1", "pitfall2"]
+}
+
+Create a comprehensive prompt that includes:
+- Language-specific testing conventions and frameworks
+- Specific rules to avoid test failures
+- Import and dependency management
+- Assertion patterns that work reliably
+- File structure and naming conventions
+- Common mistakes to avoid for this language`
+
+	userPrompt := fmt.Sprintf(`Create a specialized test writing prompt for this project:
+
+LANGUAGE: %s
+PROJECT: %s
+TEST COMMANDS: %s
+
+PROJECT ANALYSIS:
+- Language: %s
+- Docker Image: %s
+- Working Directory: %s
+- Install Commands: %d configured
+- Test Commands: %d configured
+
+PROJECT FILES STRUCTURE:
+%s
+
+REQUIREMENTS:
+1. Tests must be syntactically correct and executable
+2. Tests should use proper testing frameworks for %s
+3. Tests must import only existing functions and classes
+4. Tests should follow %s conventions
+5. Tests must pass execution without errors
+6. Include specific rules to prevent common test failures
+7. Consider the project's actual file structure and dependencies
+
+Generate a detailed prompt that will help an AI write tests that actually work and pass execution.`,
+		session.Analysis.Language,
+		session.ProjectName,
+		strings.Join(session.Analysis.TestCommands, "; "),
+		session.Analysis.Language,
+		session.Analysis.DockerImage,
+		session.Analysis.WorkingDir,
+		len(session.Analysis.InstallCommands),
+		len(session.Analysis.TestCommands),
+		h.extractProjectStructureForPrompt(session.Files),
+		session.Analysis.Language,
+		session.Analysis.Language)
+
+	messages := []llm.Message{
+		{Role: "system", Content: systemPrompt},
+		{Role: "user", Content: userPrompt},
+	}
+
+	log.Printf("🔍 Requesting specialized test prompt from LLM")
+
+	response, err := h.llmClient.Generate(ctx, messages)
+	if err != nil {
+		return "", fmt.Errorf("LLM test prompt generation failed: %w", err)
+	}
+
+	// Парсим JSON ответ
+	var promptResponse struct {
+		TestPrompt       string   `json:"test_prompt"`
+		KeyRules         []string `json:"key_rules"`
+		TestingFramework string   `json:"testing_framework"`
+		FileNaming       string   `json:"file_naming"`
+		BestPractices    []string `json:"best_practices"`
+		CommonPitfalls   []string `json:"common_pitfalls"`
+	}
+
+	content := response.Content
+	if strings.Contains(content, "```json") {
+		start := strings.Index(content, "```json") + 7
+		end := strings.Index(content[start:], "```")
+		if end > 0 {
+			content = strings.TrimSpace(content[start : start+end])
+		}
+	}
+
+	if err := json.Unmarshal([]byte(content), &promptResponse); err != nil {
+		log.Printf("⚠️ Failed to parse LLM prompt response: %v", err)
+		return "", fmt.Errorf("failed to parse test prompt response: %w", err)
+	}
+
+	// Формируем финальный промпт
+	var finalPrompt strings.Builder
+
+	finalPrompt.WriteString(promptResponse.TestPrompt)
+	finalPrompt.WriteString("\n\n")
+
+	if promptResponse.TestingFramework != "" {
+		finalPrompt.WriteString(fmt.Sprintf("RECOMMENDED TESTING FRAMEWORK: %s\n", promptResponse.TestingFramework))
+	}
+
+	if promptResponse.FileNaming != "" {
+		finalPrompt.WriteString(fmt.Sprintf("FILE NAMING CONVENTION: %s\n", promptResponse.FileNaming))
+	}
+
+	if len(promptResponse.KeyRules) > 0 {
+		finalPrompt.WriteString("\nCRITICAL RULES (tests MUST follow these to pass):\n")
+		for i, rule := range promptResponse.KeyRules {
+			finalPrompt.WriteString(fmt.Sprintf("%d. %s\n", i+1, rule))
+		}
+	}
+
+	if len(promptResponse.BestPractices) > 0 {
+		finalPrompt.WriteString("\nBEST PRACTICES:\n")
+		for _, practice := range promptResponse.BestPractices {
+			finalPrompt.WriteString(fmt.Sprintf("- %s\n", practice))
+		}
+	}
+
+	if len(promptResponse.CommonPitfalls) > 0 {
+		finalPrompt.WriteString("\nAVOID THESE PITFALLS:\n")
+		for _, pitfall := range promptResponse.CommonPitfalls {
+			finalPrompt.WriteString(fmt.Sprintf("⚠️ %s\n", pitfall))
+		}
+	}
+
+	// Добавляем контекст проекта
+	finalPrompt.WriteString(fmt.Sprintf("\nPROJECT CONTEXT:\n%s", h.formatProjectFilesForValidation(session.Files)))
+
+	log.Printf("✅ Generated specialized test prompt (%d chars) with framework: %s",
+		len(finalPrompt.String()), promptResponse.TestingFramework)
+
+	return finalPrompt.String(), nil
+}
+
+// extractProjectStructureForPrompt извлекает структуру проекта для анализа промпта
+func (h *VibeCodingHandler) extractProjectStructureForPrompt(files map[string]string) string {
+	var result strings.Builder
+
+	// Анализируем структуру файлов
+	result.WriteString("FILE STRUCTURE:\n")
+	for filename := range files {
+		result.WriteString(fmt.Sprintf("- %s\n", filename))
+	}
+
+	// Анализируем зависимости
+	result.WriteString("\nDETECTED DEPENDENCIES:\n")
+	dependencies := make(map[string]bool)
+
+	for _, content := range files {
+		lines := strings.Split(content, "\n")
+		for _, line := range lines {
+			trimmed := strings.TrimSpace(line)
+
+			// Python imports
+			if strings.HasPrefix(trimmed, "import ") || strings.HasPrefix(trimmed, "from ") {
+				dependencies[trimmed] = true
+			}
+
+			// Go imports
+			if strings.Contains(trimmed, "\"") && (strings.Contains(line, "import") || strings.Contains(line, "package")) {
+				dependencies[trimmed] = true
+			}
+		}
+	}
+
+	count := 0
+	for dep := range dependencies {
+		if count >= 10 { // Показываем только первые 10
+			result.WriteString("... (and more)\n")
+			break
+		}
+		result.WriteString(fmt.Sprintf("- %s\n", dep))
+		count++
+	}
+
+	return result.String()
 }

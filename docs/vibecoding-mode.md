@@ -2,42 +2,59 @@
 
 ## Overview
 
-VibeCoding Mode is an interactive development session that allows users to upload code archives, get real-time analysis, generate tests, and iteratively improve their projects with AI assistance. It provides a comprehensive development environment with automated test fixing, environment setup, and project visualization.
+VibeCoding Mode is an interactive development session that allows users to upload code archives, get real-time analysis, generate tests, and iteratively improve their projects with AI assistance. It provides a comprehensive development environment with automated test fixing, environment setup, project visualization, **compressed project context for AI**, and now includes a full MCP (Model Context Protocol) server architecture with external web interface.
 
 ## Table of Contents
 
 1. [Architecture](#architecture)
 2. [Core Components](#core-components)
-3. [Session Management](#session-management)
-4. [LLM Integration](#llm-integration)
-5. [Test System](#test-system)
-6. [Web Interface](#web-interface)
-7. [Usage Guide](#usage-guide)
-8. [API Reference](#api-reference)
-9. [Configuration](#configuration)
-10. [Troubleshooting](#troubleshooting)
+3. [Compressed Project Context](#compressed-project-context)
+4. [MCP Server Architecture](#mcp-server-architecture)
+5. [External Web Interface](#external-web-interface)
+6. [Session Management](#session-management)
+7. [LLM Integration](#llm-integration)
+8. [Test System](#test-system)
+9. [Web Interface](#web-interface)
+10. [Usage Guide](#usage-guide)
+11. [API Reference](#api-reference)
+12. [Configuration](#configuration)
+13. [Troubleshooting](#troubleshooting)
 
 ## Architecture
 
 VibeCoding mode is built with a modular architecture consisting of several key components:
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Telegram Bot  │────│  VibeCoding     │────│   LLM Client    │
-│                 │    │   Handler       │    │                 │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                              │
-                    ┌─────────┼─────────┐
-                    │                   │
-          ┌─────────────────┐    ┌─────────────────┐
-          │ Session Manager │    │  Web Server     │
-          │                 │    │                 │
-          └─────────────────┘    └─────────────────┘
-                    │                   │
-          ┌─────────────────┐    ┌─────────────────┐
-          │ Docker Adapter  │    │  File Viewer    │
-          │                 │    │                 │
-          └─────────────────┘    └─────────────────┘
+┌─────────────────────┐    ┌─────────────────────┐    ┌─────────────────┐
+│   Telegram Bot      │────│  VibeCoding         │────│   LLM Client    │
+│                     │    │   Handler           │    │                 │
+└─────────────────────┘    └─────────────────────┘    └─────────────────┘
+                                      │
+                        ┌─────────────┼─────────────┐
+                        │                           │
+            ┌─────────────────────┐    ┌─────────────────────┐
+            │ Session Manager     │    │  Internal Web       │
+            │                     │    │  Server             │
+            └─────────────────────┘    └─────────────────────┘
+                        │
+              ┌─────────┼─────────┐
+              │                   │
+    ┌─────────────────┐    ┌─────────────────────┐
+    │ Docker Adapter  │    │ VibeCoding MCP      │
+    │                 │    │ Server              │
+    └─────────────────┘    └─────────────────────┘
+              │                   │
+    ┌─────────────────┐           │ MCP Protocol
+    │ Docker          │           │ (stdin/stdout)
+    │ Containers      │           │
+    │ + MCP Server    │           │
+    └─────────────────┘           │
+                                  │
+                      ┌─────────────────────┐
+                      │ External Web        │
+                      │ Interface           │
+                      │ (localhost:3000)    │
+                      └─────────────────────┘
 ```
 
 ### Key Features
@@ -45,9 +62,455 @@ VibeCoding mode is built with a modular architecture consisting of several key c
 - **Interactive Development**: Real-time code analysis and improvement suggestions
 - **Automated Environment Setup**: Docker-based isolated environments with LLM-guided configuration
 - **Intelligent Test Generation**: Automatic test creation with iterative fixing based on execution results
-- **Web Interface**: Browser-based project visualization and file exploration
-- **MCP Integration**: Model Context Protocol for direct LLM access to project files
+- **Dual Web Interface**: 
+  - Internal web server for basic project visualization
+  - External web interface with full MCP integration for advanced interaction
+- **Full MCP Server**: Complete Model Context Protocol server running inside containers
+- **External MCP Client**: Dedicated web interface communicating via MCP protocol
 - **Multi-Language Support**: Python, JavaScript/TypeScript, Go, Java, and more
+- **Container Orchestration**: Docker Compose setup for scalable deployment
+- **LLM-Based Architecture**: Removed all hardcoded language patterns in favor of unified LLM approach
+
+## Compressed Project Context
+
+VibeCoding automatically generates a compressed, AI-optimized representation of your project that enables efficient understanding and navigation by Large Language Models. The system now uses **LLM-based context generation** with parallel execution for optimal performance.
+
+### LLM Context Generation Architecture
+
+VibeCoding has moved from AST-based analysis to a sophisticated LLM-powered context generation system that provides:
+
+#### **Parallel Generation (`llm_context_generator.go`)**
+- Context generation runs **parallel with environment setup** for optimal performance
+- Uses preloaded file lists to avoid I/O blocking
+- Token budget management (5000 tokens by default, configurable)
+- Incremental updates for modified files
+- Universal JSON storage format
+
+```go
+type ProjectContextLLM struct {
+    ProjectName  string                    `json:"project_name"`
+    Language     string                    `json:"language"`
+    GeneratedAt  time.Time                 `json:"generated_at"`
+    TotalFiles   int                       `json:"total_files"`
+    Description  string                    `json:"description"`
+    Dependencies []string                  `json:"dependencies,omitempty"`
+    Files        map[string]LLMFileContext `json:"files"`
+    Structure    ProjectStructure          `json:"structure"`
+    TokensUsed   int                       `json:"tokens_used"`
+    TokensLimit  int                       `json:"tokens_limit"`
+}
+
+type LLMFileContext struct {
+    Path         string    `json:"path"`
+    Type         string    `json:"type"`
+    Size         int       `json:"size"`
+    LastModified time.Time `json:"last_modified"`
+    Summary      string    `json:"summary"`      // LLM-generated description
+    KeyElements  []string  `json:"key_elements"` // Main functions/classes/interfaces
+    Purpose      string    `json:"purpose"`      // File's role in project
+    Dependencies []string  `json:"dependencies"` // File dependencies
+    TokensUsed   int       `json:"tokens_used"`  // Tokens used for this description
+    NeedsUpdate  bool      `json:"needs_update"` // Update flag
+}
+```
+
+### Key Features
+
+#### 1. **LLM-Powered Analysis**
+- **Language Agnostic**: Works with any programming language
+- **Context-Aware**: Understands project architecture and relationships
+- **Smart Summarization**: Focuses on key elements rather than raw syntax
+- **On-Demand Content**: Large files analyzed via MCP tools when needed
+
+#### 2. **Token Budget Management**
+- **Configurable Limits**: Default 5000 tokens, adjustable per project
+- **Smart Allocation**: Budget distributed based on file importance
+- **Priority Sorting**: Critical files (main.go, API endpoints) get priority
+- **Efficient Usage**: Only stores essential information within budget
+
+#### 3. **Parallel Execution Optimization**
+- **Non-Blocking**: Context generation runs during environment setup
+- **Preloaded Files**: Uses existing file lists to avoid redundant scanning
+- **Async Processing**: Background generation with progress logging
+- **Error Resilient**: Graceful fallbacks for individual file failures
+
+#### 4. **Universal Storage Format**
+- **JSON Structure**: Language-independent, consistent format
+- **Cross-Platform**: Same format across different project types  
+- **Version Tracking**: Metadata includes generator version and timestamps
+- **MCP Integration**: Includes usage instructions for LLM tools
+
+### Dual Format Generation
+
+Each VibeCoding session automatically creates **two context files** in the project root:
+
+#### 1. **`vibecoding-context.json`** - Universal Format
+Language-independent JSON structure for programmatic access:
+
+```json
+{
+  "metadata": {
+    "project_name": "ai-chatter",
+    "language": "go", 
+    "generator": "LLM",
+    "version": "1.0",
+    "generated_at": "2025-08-21T15:04:05Z",
+    "total_files": 15,
+    "tokens_used": 3420,
+    "tokens_limit": 5000
+  },
+  "description": "Go-based Telegram bot with VibeCoding mode",
+  "dependencies": ["github.com/go-telegram-bot-api/telegram-bot-api", "..."],
+  "structure": {
+    "directories": [
+      {"path": "cmd", "file_count": 2, "purpose": "Application entry points"},
+      {"path": "internal", "file_count": 8, "purpose": "Internal application code"}
+    ],
+    "file_types": [
+      {"extension": ".go", "count": 12, "language": "Go"},
+      {"extension": ".md", "count": 3, "language": "Markdown"}
+    ]
+  },
+  "files": {
+    "cmd/main.go": {
+      "summary": "Main application entry point with Telegram bot setup",
+      "key_elements": ["main", "setupBot", "Config"],
+      "purpose": "Application bootstrap and configuration",
+      "dependencies": ["internal/telegram", "internal/vibecoding"],
+      "tokens_used": 45
+    }
+  },
+  "usage_instructions": {
+    "mcp_tools": [
+      "vibe_read_file - Get full file content",
+      "vibe_write_file - Create or modify files",
+      "vibe_execute_command - Run commands"
+    ]
+  }
+}
+```
+
+#### 2. **`vibecoding-context.md`** - Human-Readable Format
+Markdown document for easy browsing and understanding:
+
+```markdown
+# LLM-Generated Project Context
+
+**Generated:** 2025-08-21 15:04:05
+**Project:** ai-chatter
+**Language:** go
+**Total Files:** 15
+**Tokens Used:** 3420 / 5000
+
+**Description:** Go-based Telegram bot with VibeCoding mode
+
+## Project Structure
+- **cmd** (2 files) - Application entry points
+- **internal** (8 files) - Internal application code
+- **pkg** (5 files) - Library code
+
+## File Descriptions (LLM-Generated)
+
+### cmd/main.go
+**Type:** go | **Size:** 1250 bytes | **Tokens Used:** 45
+
+**Summary:** Main application entry point with Telegram bot setup
+**Purpose:** Application bootstrap and configuration
+**Key Elements:** main, setupBot, Config
+**Dependencies:** internal/telegram, internal/vibecoding
+
+---
+
+## Usage Instructions for LLM
+This is an LLM-generated compressed project context with token budgeting.
+Always use MCP tools to access actual file contents for implementation details.
+```
+
+### Unified Architecture & Performance
+
+#### **Single Request Optimization**
+The new architecture combines project analysis and context generation in one LLM request:
+
+```
+                    ┌─────────────────┐
+                    │ Single LLM      │
+                    │ Request         │
+                    │                 │
+                    │ 📊 Analysis +   │
+                    │ 🧠 Context      │
+                    └─────┬───────────┘
+                          │
+                    ┌─────▼───────────┐
+                    │ Combined        │
+                    │ Response        │
+                    │                 │
+                    │ • Docker setup  │
+                    │ • Dependencies  │
+                    │ • Project desc  │
+                    │ • File contexts │
+                    └─────┬───────────┘
+                          │
+              ┌───────────┼───────────┐
+              ▼                       ▼
+      ┌──────────────┐        ┌──────────────┐
+      │ Environment  │        │ Context      │
+      │ Setup        │        │ Generation   │
+      │              │        │              │
+      │ • Container  │        │ • File desc  │
+      │ • Files      │        │ • Structure  │
+      │ • Deps       │        │ • JSON/MD    │
+      └──────────────┘        └──────────────┘
+```
+
+#### **Performance Benefits**
+- **Single LLM call** instead of multiple requests
+- **Consistent analysis** - same context used for setup and documentation
+- **Reduced latency** - no waiting for parallel processes
+- **Simplified error handling** - single point of failure
+- **Better token efficiency** - unified context understanding
+
+#### **Unified Analysis Features**
+- **Environment Setup**: Docker image, install commands, validation commands
+- **Project Context**: File descriptions, structure analysis, dependencies
+- **Consistent Language Detection**: Same language analysis for both purposes
+- **Smart Content Limitation**: Includes key file contents (up to 1000 chars per file)
+
+#### **Combined Request Structure**
+```json
+{
+  "analysis": {
+    "language": "Go",
+    "docker_image": "golang:1.22",
+    "install_commands": ["go mod download"],
+    "validation_commands": ["go build ./..."],
+    "test_commands": ["go test ./..."],
+    "working_dir": "/workspace",
+    "reasoning": "Go project with modules"
+  },
+  "context": {
+    "description": "Go-based Telegram bot with VibeCoding mode",
+    "files": {
+      "main.go": {
+        "summary": "Application entry point",
+        "key_elements": ["main", "setupBot"],
+        "purpose": "Bootstrap and configuration"
+      }
+    }
+  }
+}
+```
+
+### LLM Integration
+
+#### Autonomous Work Enhancement
+The compressed context is automatically included in LLM prompts for autonomous work:
+
+```
+PROJECT CONTEXT (COMPRESSED):
+Language: go | Total files: 15
+
+cmd/main.go (go):
+  Summary: Application entry point with server setup
+  Functions: main, setupServer
+  
+internal/api/handler.go (go):
+  Summary: HTTP request handlers and routing
+  Functions: NewHandler, HandleRequest, HandleAuth
+  Structs: Handler, Config
+```
+
+#### Context-Aware Operations
+- LLM understands project structure before making changes
+- Smart file navigation based on architecture
+- Informed decisions about where to place new code
+- Efficient use of MCP tools for file access
+
+### Commands
+
+#### `/vibecoding_context`
+Manually refresh the project context:
+```
+[vibecoding] ✅ Контекст проекта обновлен
+
+📊 Статистика:
+Всего файлов: 15
+Функций: 42
+Структур: 8
+Обновлен: 15:04:05
+
+📋 Полный контекст доступен в файле PROJECT_CONTEXT.md
+```
+
+#### Context in `/vibecoding_info`
+Session info now includes context statistics:
+```
+📋 Контекст проекта: доступен
+Сгенерирован: 15:04:05
+Функций: 42, структур: 8
+Полный контекст: PROJECT_CONTEXT.md
+```
+
+### Dynamic Updates
+- Context automatically refreshes when files are modified
+- Background regeneration prevents blocking operations  
+- Timestamp tracking for context freshness
+- Incremental updates for performance
+
+## MCP Server Architecture
+
+### VibeCoding MCP Server (`cmd/vibecoding-mcp-server/main.go`)
+
+The VibeCoding MCP Server is a complete Model Context Protocol implementation that provides programmatic access to VibeCoding sessions. It follows the same architecture as Gmail and Notion MCP servers.
+
+```go
+type VibeCodingMCPServer struct {
+    sessionManager *vibecoding.SessionManager
+}
+```
+
+**Registered MCP Tools:**
+
+1. **`vibe_list_files`** - List all files in workspace
+   - Parameters: `user_id`
+   - Returns: Array of filenames with metadata
+
+2. **`vibe_read_file`** - Read file content
+   - Parameters: `user_id`, `filename`
+   - Returns: File content and metadata
+
+3. **`vibe_write_file`** - Write/update file
+   - Parameters: `user_id`, `filename`, `content`, `generated`
+   - Returns: Success status and file info
+
+4. **`vibe_execute_command`** - Execute shell command
+   - Parameters: `user_id`, `command`
+   - Returns: Command output, exit code, success status
+
+5. **`vibe_validate_code`** - Validate code syntax/compilation
+   - Parameters: `user_id`, `filename`
+   - Returns: Validation results with errors/warnings
+
+6. **`vibe_run_tests`** - Execute test suite
+   - Parameters: `user_id`, `test_file` (optional)
+   - Returns: Test results and output
+
+7. **`vibe_get_session_info`** - Get session metadata
+   - Parameters: `user_id`
+   - Returns: Session status, container info, timestamps
+
+### MCP Communication Protocol
+
+The server communicates via standard stdin/stdout JSON-RPC 2.0:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "tools/call",
+  "params": {
+    "name": "vibe_read_file",
+    "arguments": {
+      "user_id": 123456,
+      "filename": "main.py"
+    }
+  }
+}
+```
+
+### Docker Integration
+
+The MCP server is automatically deployed inside each coding container:
+
+1. **Container Creation**: When a VibeCoding session starts, the system creates a Docker container
+2. **MCP Server Deployment**: The `vibecoding-mcp-server` binary is copied into the container
+3. **Auto-Start**: The MCP server starts automatically as a background process
+4. **External Access**: External clients can connect to the MCP server for direct file/command access
+
+## External Web Interface
+
+### Architecture (`docker/vibecoding-web/`)
+
+The external web interface runs in a separate Docker container and communicates with VibeCoding sessions through the internal HTTP API.
+
+```
+External Web Container (Node.js + Express)
+    ↓ HTTP API
+Web UI (HTML/CSS/JavaScript)
+    ↓ RESTful calls
+VibeCoding HTTP API Client
+    ↓ HTTP requests (port 8080)
+VibeCoding Internal API
+    ↓ Direct API calls
+VibeCoding Session Manager
+```
+
+### Web Interface Features
+
+1. **Session Management**
+   - Load sessions by User ID
+   - Display session information and status
+   - Real-time connection status monitoring
+
+2. **File Management**
+   - Interactive file browser with tree view
+   - Syntax-highlighted code editor
+   - Save changes directly to containers
+   - Distinguish between original and generated files
+
+3. **Terminal Interface**
+   - Execute commands in real-time
+   - Command history and auto-completion
+   - Scrollable output display
+   - Background command execution
+
+4. **Test Runner**
+   - One-click test execution
+   - Test result visualization
+   - Pass/fail status indicators
+   - Test output analysis
+
+### API Endpoints
+
+```javascript
+// File operations
+GET    /api/files/:userId              // List all files (HTTP API)
+GET    /api/files/:userId/:filename    // Read file content (HTTP API)
+POST   /api/files/:userId/:filename    // Write file content (stub)
+
+// Command execution
+POST   /api/execute/:userId           // Execute shell command (stub)
+POST   /api/test/:userId              // Run tests (stub)
+
+// Session management
+GET    /api/session/:userId           // Get session info (HTTP API)
+GET    /api/status                    // Server status and HTTP API connection
+```
+
+### Docker Compose Deployment
+
+The system now supports full containerization:
+
+```yaml
+# docker-compose.vibecoding.yml
+services:
+  vibecoding-mcp:
+    build: docker/vibecoding-mcp/
+    volumes:
+      - /tmp/vibecoding-mcp:/tmp/vibecoding-mcp
+    
+  vibecoding-web:
+    build: docker/vibecoding-web/
+    ports:
+      - "3000:3000"
+    depends_on:
+      - vibecoding-mcp
+```
+
+**Startup Script:**
+
+```bash
+./scripts/start-vibecoding-web.sh
+```
 
 ## Core Components
 
@@ -68,14 +531,22 @@ type VibeCodingSession struct {
     TestCommand    string                             // Test execution command
     Docker         *DockerAdapter                     // Docker interface
     LLMClient      llm.Client                         // LLM client
+    Context        *ProjectContext                    // Compressed project context
 }
 ```
 
 **Key Methods:**
-- `SetupEnvironment(ctx)`: Configures Docker environment with up to 3 retry attempts
+- `SetupEnvironment(ctx)`: Configures Docker environment with up to 3 retry attempts, auto-starts MCP server, and generates project context
 - `ExecuteCommand(ctx, command)`: Runs commands in the container
+- `ListFiles(ctx)`: Returns list of all files in session
+- `ReadFile(ctx, filename)`: Reads content of a specific file
+- `WriteFile(ctx, filename, content, generated)`: Writes file to session and container, auto-refreshes context
+- `ValidateCode(ctx, code, filename)`: Validates code using container environment
 - `AddGeneratedFile(filename, content)`: Adds AI-generated files
 - `GetAllFiles()`: Returns combined original and generated files
+- `GetProjectContext()`: Returns compressed project context
+- `RefreshProjectContext()`: Manually regenerates project context
+- `CreatedAt()`: Returns session creation time for MCP compatibility
 - `Cleanup()`: Releases resources when session ends
 
 ### 2. SessionManager (`session.go`)
@@ -92,19 +563,21 @@ type SessionManager struct {
 
 **Key Methods:**
 - `CreateSession(userID, chatID, projectName, files, llmClient)`: Creates new session
-- `GetSession(userID)`: Retrieves active session
+- `GetSession(userID)`: Retrieves active session (now returns pointer only)
 - `EndSession(userID)`: Terminates session and cleanup
 - `HasActiveSession(userID)`: Checks if user has active session
+- `GetActiveSessions()`: Returns count of active sessions
 
 ### 3. VibeCodingHandler (`commands.go`)
 
 Handles Telegram commands and user interactions.
 
 **Supported Commands:**
-- `/vibecoding_info`: Session information
+- `/vibecoding_info`: Session information with context statistics
+- `/vibecoding_context`: Refresh project context manually
 - `/vibecoding_test`: Run tests with auto-fixing
 - `/vibecoding_generate_tests`: Generate new tests
-- `/vibecoding_auto`: Autonomous AI work
+- `/vibecoding_auto`: Autonomous AI work with compressed context
 - `/vibecoding_end`: End session and export results
 
 ### 4. Docker Integration (`docker_adapter.go`)
@@ -292,73 +765,104 @@ func (h *VibeCodingHandler) handleTestCommand(ctx context.Context, chatID int64,
 }
 ```
 
-### Test File Detection
+### LLM-Based Test Detection
 
-The system intelligently identifies test files across multiple languages:
+**DEPRECATED**: Hardcoded test file detection has been completely removed and replaced with LLM-based analysis for maximum flexibility and accuracy across all programming languages.
 
-```go
-func (h *VibeCodingHandler) isTestFile(filename string) bool {
-    filename = strings.ToLower(filename)
-    
-    // Check prefixes and suffixes
-    if strings.HasPrefix(filename, "test_") || 
-       strings.HasSuffix(filename, "_test.py") ||
-       strings.HasSuffix(filename, "_test.go") ||
-       strings.HasSuffix(filename, ".test.js") ||
-       strings.HasSuffix(filename, ".spec.js") ||
-       strings.Contains(filename, "test") {
-        return true
-    }
-    
-    // Check directories
-    if strings.Contains(filename, "/test/") || 
-       strings.Contains(filename, "/tests/") {
-        return true
-    }
-    
-    return false
-}
-```
+The system now uses LLM analysis to:
+- Identify test files with context and confidence scoring
+- Determine test command compatibility with specific files
+- Adapt test commands for different file types
+- Generate appropriate test commands based on project structure
+
+This unified approach eliminates language-specific hardcoded patterns and provides better support for:
+- Custom testing frameworks
+- Non-standard file naming conventions
+- Multi-language projects
+- Emerging programming languages
 
 ## Web Interface
 
-### Project Visualization (`webserver.go`)
+VibeCoding now provides two complementary web interfaces:
 
-The web server provides a real-time view of the project structure and files:
+### 1. Internal Web Server (`webserver.go`)
 
-- **URL Pattern**: `http://localhost:8080/vibe_{userID}`
+Basic project visualization integrated with the Telegram bot:
+
+- **URL Pattern**: `http://localhost:8080/api/vibe/{userID}` (internal API)
+- **Purpose**: Quick project overview and file browsing
+- **Features**: File tree, basic file viewer, session stats
 - **Auto-refresh**: Updates every 30 seconds
-- **File Tree**: Interactive file browser with expand/collapse
-- **File Viewer**: Syntax-highlighted code display
-- **Session Stats**: Real-time session information
 
-### Key Endpoints
+### 2. External Web Interface (HTTP API-Based)
+
+Advanced web interface with HTTP API integration:
+
+- **URL**: `http://localhost:3000`
+- **Purpose**: Complete project management and development environment
+- **Architecture**: Separate Docker container communicating via HTTP API
+- **Features**: 
+  - Interactive file browser and viewer
+  - Session management dashboard
+  - Live connection status monitoring
+  - File loading and display (read-only currently)
+
+### Key Endpoints (Internal)
 
 - `GET /vibe_{userID}`: Main project page
 - `GET /api/vibe_{userID}`: JSON session data
 - `GET /api/vibe_{userID}/file/{filepath}`: File content
 - `GET /static/...`: Static assets (CSS, JS)
 
-### Features
+### Key Endpoints (External HTTP API)
 
-- **Dark Theme**: IDE-style interface
-- **File Type Icons**: Visual file type identification
-- **Generated File Highlighting**: Distinguishes AI-generated files
-- **Responsive Design**: Works on various screen sizes
-- **Real-time Updates**: Reflects changes as they happen
+- `GET /api/files/:userId`: List files via HTTP API
+- `GET /api/files/:userId/:filename`: Read file via HTTP API
+- `POST /api/files/:userId/:filename`: Write file (stub)
+- `POST /api/execute/:userId`: Execute commands (stub)
+- `POST /api/test/:userId`: Run tests (stub)
+- `GET /api/session/:userId`: Session info via HTTP API
+- `GET /api/status`: HTTP API connection status
+
+### Technology Stack
+
+**Internal Server:**
+- Go + HTML templates
+- WebSocket for real-time updates
+- Static file serving
+
+**External Interface:**
+- Node.js + Express backend
+- Vanilla JavaScript frontend
+- HTTP API client for internal communication
+- Docker containerization
 
 ## Usage Guide
 
 ### Starting a VibeCoding Session
+
+#### Method 1: Traditional Telegram Bot Workflow
 
 1. **Prepare Archive**: Create a .zip/.tar.gz archive of your project
 2. **Upload**: Send the archive to the Telegram bot without any caption
 3. **Wait for Setup**: The system will automatically:
    - Extract files
    - Analyze the project with LLM
-   - Set up Docker environment
+   - Set up Docker environment with MCP server
    - Install dependencies
-4. **Receive Confirmation**: Get session details and web interface URL
+   - Deploy VibeCoding MCP server inside container
+4. **Receive Confirmation**: Get session details and both web interface URLs
+
+#### Method 2: External Web Interface (New)
+
+1. **Start VibeCoding System**: Run `./scripts/start-vibecoding-web.sh`
+2. **Access Web Interface**: Open `http://localhost:3000`
+3. **Load Session**: Enter User ID and click "Load Session"
+4. **Interactive Development**: Use the full-featured web interface for:
+   - File editing and management
+   - Command execution
+   - Test running
+   - Real-time project monitoring
 
 ### Example Session Flow
 
@@ -367,23 +871,33 @@ User: [Uploads Python project archive]
 Bot: 🔥 Сессия вайбкодинга готова!
      Проект: my-python-app
      Язык: Python
-     🌐 Веб-интерфейс: http://localhost:8080/vibe_123
+     🔧 MCP сервер запущен в контейнере
+     🌐 Веб-интерфейс: http://localhost:3000
+     🌐 Внешний интерфейс: http://localhost:3000 (User ID: 123)
 
-User: /vibecoding_generate_tests
-Bot: 🧠 Генерация тестов...
-     ✅ Тесты сгенерированы и сохранены в проект
-     📝 Сгенерированный файл: test_main.py
+User: [Opens external web interface at localhost:3000]
+      [Enters User ID: 123 and clicks "Load Session"]
+Web:  ✅ Session loaded successfully
+      📁 Files: main.py, requirements.txt, README.md
+      📊 Status: Active, Container: abc123
 
-User: /vibecoding_test
-Bot: 🧪 Запуск тестов...
-     ✅ Тесты выполнены успешно
+User: [Clicks "Run Tests" in web interface]
+Web:  🧪 Running tests...
+      ✅ All tests passed (3/3)
 
-User: "Add error handling to the main function"
-Bot: [Provides code improvements and explanations]
+User: [Edits main.py in web editor, adds error handling]
+      [Clicks "Save"]
+Web:  💾 File saved successfully
 
-User: /vibecoding_end
-Bot: 🔥 Сессия завершена
-     [Sends archive with all original and generated files]
+User: [Executes "python main.py" in web terminal]
+Web:  $ python main.py
+      Hello World with error handling!
+      $ 
+
+User: /vibecoding_end (in Telegram)
+Bot:  🔥 Сессия завершена
+      📦 MCP сервер остановлен
+      [Sends archive with all original and generated files]
 ```
 
 ### Interactive Commands
@@ -426,11 +940,17 @@ Bot: 🔥 Сессия завершена
 #### VibeCodingSession
 
 ```go
-// Create and setup environment
+// Create and setup environment with MCP server auto-start
 func (s *VibeCodingSession) SetupEnvironment(ctx context.Context) error
 
 // Execute commands in container
 func (s *VibeCodingSession) ExecuteCommand(ctx context.Context, command string) (*ValidationResult, error)
+
+// MCP-compatible file operations
+func (s *VibeCodingSession) ListFiles(ctx context.Context) ([]string, error)
+func (s *VibeCodingSession) ReadFile(ctx context.Context, filename string) (string, error)
+func (s *VibeCodingSession) WriteFile(ctx context.Context, filename, content string, generated bool) error
+func (s *VibeCodingSession) ValidateCode(ctx context.Context, code, filename string) (*ValidationResult, error)
 
 // Add generated files
 func (s *VibeCodingSession) AddGeneratedFile(filename, content string)
@@ -440,6 +960,9 @@ func (s *VibeCodingSession) GetAllFiles() map[string]string
 
 // Get session information
 func (s *VibeCodingSession) GetSessionInfo() map[string]interface{}
+
+// MCP compatibility
+func (s *VibeCodingSession) CreatedAt() time.Time
 
 // Cleanup resources
 func (s *VibeCodingSession) Cleanup() error
@@ -451,14 +974,17 @@ func (s *VibeCodingSession) Cleanup() error
 // Create new session
 func (sm *SessionManager) CreateSession(userID, chatID int64, projectName string, files map[string]string, llmClient llm.Client) (*VibeCodingSession, error)
 
-// Get existing session
-func (sm *SessionManager) GetSession(userID int64) (*VibeCodingSession, bool)
+// Get existing session (returns pointer only)
+func (sm *SessionManager) GetSession(userID int64) *VibeCodingSession
 
 // End session
 func (sm *SessionManager) EndSession(userID int64) error
 
 // Check if session exists
 func (sm *SessionManager) HasActiveSession(userID int64) bool
+
+// Get active session count
+func (sm *SessionManager) GetActiveSessions() int
 ```
 
 #### VibeCodingHandler
@@ -472,6 +998,27 @@ func (h *VibeCodingHandler) HandleVibeCodingCommand(ctx context.Context, userID,
 
 // Handle text messages
 func (h *VibeCodingHandler) HandleVibeCodingMessage(ctx context.Context, userID, chatID int64, messageText string) error
+```
+
+### MCP Server API
+
+#### VibeCodingMCPServer
+
+```go
+// MCP tool implementations
+func (s *VibeCodingMCPServer) ListFiles(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) ReadFile(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) WriteFile(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) ExecuteCommand(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) ValidateCode(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) RunTests(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
+
+func (s *VibeCodingMCPServer) GetSessionInfo(ctx context.Context, session *mcp.ServerSession, params *mcp.CallToolParamsFor[map[string]interface{}]) (*mcp.CallToolResultFor[any], error)
 ```
 
 ### LLM Protocol
@@ -528,16 +1075,22 @@ func (h *VibeCodingHandler) HandleVibeCodingMessage(ctx context.Context, userID,
 # Docker configuration
 DOCKER_HOST=unix:///var/run/docker.sock
 
-# VibeCoding MCP server path
-VIBECODING_MCP_SERVER_PATH=./vibecoding-mcp-server
+# VibeCoding MCP server configuration
+VIBECODING_MCP_SERVER_PATH=./cmd/vibecoding-mcp-server/vibecoding-mcp-server
+MCP_SOCKET_PATH=/tmp/vibecoding-mcp
 
-# Web server port (default: 8080)
-VIBECODING_WEB_PORT=8080
+# Web server ports
+VIBECODING_WEB_PORT=8080    # Internal web server
+PORT=3000                   # External web interface
 
 # LLM configuration
 LLM_PROVIDER=openai
 LLM_MODEL=gpt-4
 LLM_API_KEY=your-api-key
+
+# Docker Compose configuration
+COMPOSE_PROJECT_NAME=vibecoding
+COMPOSE_FILE=docker-compose.vibecoding.yml
 ```
 
 ### Docker Images
@@ -573,13 +1126,19 @@ const (
    - Check Docker is running
    - Verify project has valid configuration files (package.json, requirements.txt, etc.)
    - Check logs for specific error messages
+   - Ensure VibeCoding MCP server binary is built
 
-3. **Tests Don't Generate**
-   - Ensure project has clear structure
-   - Add comments to explain complex code
-   - Try smaller, focused requests
+3. **MCP Server Issues**
+   - Verify MCP server is built: `go build -o ./cmd/vibecoding-mcp-server/vibecoding-mcp-server ./cmd/vibecoding-mcp-server/`
+   - Check container has MCP server: `docker exec <container_id> ls -la /workspace/vibecoding-mcp-server`
+   - View MCP server logs: `docker exec <container_id> cat /tmp/mcp-server.log`
 
-4. **Web Interface Not Accessible**
+4. **External Web Interface Issues**
+   - Check MCP connection status: `curl http://localhost:3000/api/status`
+   - Verify containers are running: `docker-compose -f docker-compose.vibecoding.yml ps`
+   - Check web interface logs: `docker-compose -f docker-compose.vibecoding.yml logs vibecoding-web`
+
+5. **Internal Web Interface Not Accessible**
    - Check if port 8080 is available
    - Verify session is active
    - Try refreshing the page
@@ -593,11 +1152,25 @@ docker ps
 # View container logs
 docker logs <container_id>
 
-# Check web server
+# Check internal web server
 curl http://localhost:8080/
 
-# View session status
-curl http://localhost:8080/vibe_<user_id>
+# Check external web interface
+curl http://localhost:3000/api/status
+
+# View session status (internal API)
+curl http://localhost:8080/api/vibe/<user_id>
+
+# View session status (external MCP)
+curl http://localhost:3000/api/session/<user_id>
+
+# VibeCoding system status
+docker-compose -f docker-compose.vibecoding.yml ps
+docker-compose -f docker-compose.vibecoding.yml logs
+
+# MCP server debug
+docker exec <container_id> ps aux | grep vibecoding-mcp-server
+docker exec <container_id> netstat -tlnp | grep 8090
 ```
 
 ### Log Messages
@@ -609,6 +1182,10 @@ The system provides detailed logging with emoji indicators:
 - 🐳 Docker operations
 - 🌐 Web server events
 - 🔧 Fixing operations
+- 📤 MCP requests/responses
+- 🔗 MCP connection events
+- 💻 Terminal operations
+- 📁 File operations
 - ✅ Success operations
 - ❌ Error operations
 
@@ -619,22 +1196,44 @@ The system includes automatic error recovery mechanisms:
 1. **Environment Setup**: Up to 3 retry attempts with LLM-guided fixes
 2. **Test Execution**: Automatic fixing of failing tests
 3. **Container Issues**: Automatic container recreation
-4. **Resource Cleanup**: Automatic cleanup on session end
+4. **MCP Connection**: Automatic reconnection and retry logic
+5. **File Operations**: Graceful handling of file access errors
+6. **Resource Cleanup**: Automatic cleanup on session end
 
 ## Performance Considerations
 
 - **Memory**: Each session uses 100-500MB depending on project size
-- **CPU**: LLM requests are the main performance bottleneck
+- **CPU**: LLM requests are the main performance bottleneck  
 - **Storage**: Temporary files are cleaned up automatically
 - **Network**: Docker image downloads only occur once per image
+- **MCP Overhead**: Minimal additional overhead for protocol communication
+- **Scalability**: External web interface allows multiple concurrent sessions
 
 ## Security
 
 - **Isolation**: Each session runs in a separate Docker container
 - **File Access**: Limited to uploaded project files
-- **Network**: No external network access from containers
+- **Network**: Controlled external network access from containers
+- **MCP Security**: Communication isolated to containers and authorized clients
+- **External Interface**: Runs in separate container with no direct file system access
 - **Cleanup**: All resources are cleaned up on session end
+
+## Recent Changes
+
+### Version 2.0 - MCP Architecture Update
+
+- ✅ **Full MCP Server**: Complete Model Context Protocol implementation
+- ✅ **External Web Interface**: Separate containerized web interface with MCP communication
+- ✅ **Docker Compose**: Orchestrated deployment with `docker-compose.vibecoding.yml`
+- ✅ **LLM-Based Architecture**: Removed all hardcoded language patterns
+- ✅ **7 MCP Tools**: Complete set of tools for file/command/test operations
+- ✅ **Auto MCP Deployment**: Automatic MCP server deployment in containers
+- ✅ **Dual Interface**: Both internal (port 8080) and external (port 3000) interfaces
+- ✅ **Startup Scripts**: Automated deployment with `./scripts/start-vibecoding-web.sh`
 
 ---
 
-For more information or support, please refer to the main project documentation or create an issue in the repository.
+For more information or support, please refer to:
+- Main project documentation
+- `README-VIBECODING-MCP.md` for detailed MCP architecture guide
+- Create an issue in the repository for bugs or feature requests

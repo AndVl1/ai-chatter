@@ -1,0 +1,106 @@
+# Полная конфигурация AI Chatter с VibeCoding и веб-интерфейсом
+
+services:
+  # Основной бот AI Chatter с встроенными MCP серверами и VibeCoding
+  ai-chatter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: ai-chatter-main
+    restart: unless-stopped
+    privileged: true
+    cap_add:
+      - SYS_ADMIN
+    tmpfs:
+      - /tmp
+      - /run
+      - /run/lock
+    ports:
+      - "8080:8080"  # VibeCoding внутренний API
+    healthcheck:
+      test: ["CMD", "sh", "-c", "apk add --no-cache curl > /dev/null 2>&1 && curl -f http://localhost:8080/api/status > /dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    env_file:
+      - .env
+    environment:
+      # Telegram Bot
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      # Notion MCP настройки
+      - NOTION_PARENT_PAGE_ID=${NOTION_PARENT_PAGE_ID}
+      - NOTION_MCP_SERVER_PATH=/app/notion-mcp-server
+      # Gmail MCP настройки
+      - GMAIL_MCP_SERVER_PATH=/app/gmail-mcp-server
+      - GMAIL_CREDENTIALS_JSON=${GMAIL_CREDENTIALS_JSON}
+      - GMAIL_CREDENTIALS_JSON_PATH=${GMAIL_CREDENTIALS_JSON_PATH}
+      - GMAIL_REFRESH_TOKEN=${GMAIL_REFRESH_TOKEN}
+      # Docker daemon настройки
+      - DOCKER_TLS_CERTDIR=
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      # VibeCoding настройки
+      - PORT=8080
+      - VIBECODING_ENABLED=true
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+      - ai-chatter-docker-data:/var/lib/docker
+      - vibecoding-sessions:/app/sessions
+    networks:
+      - ai-chatter-network
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+        reservations:
+          memory: 512M
+          cpus: '0.5'
+
+  # VibeCoding MCP сервер (отдельный процесс для внешнего доступа)
+  vibecoding-mcp:
+    build:
+      context: .
+      dockerfile: docker/vibecoding-mcp/Dockerfile
+    container_name: ai-chatter-vibecoding-mcp
+    restart: unless-stopped
+    volumes:
+      - vibecoding-sessions:/app/sessions
+    networks:
+      - ai-chatter-network
+    environment:
+      - VIBECODING_SESSIONS_PATH=/app/sessions
+    depends_on:
+      - ai-chatter
+
+  # Внешний веб-интерфейс VibeCoding
+  vibecoding-web:
+    build:
+      context: docker/vibecoding-web
+      dockerfile: Dockerfile
+    container_name: ai-chatter-vibecoding-web
+    restart: unless-stopped
+    ports:
+      - "3000:3000"  # Веб-интерфейс VibeCoding
+    networks:
+      - ai-chatter-network
+    environment:
+      - NODE_ENV=production
+      - VIBECODING_API_URL=http://ai-chatter:8080
+      - PORT=3000
+    depends_on:
+      ai-chatter:
+        condition: service_healthy
+
+networks:
+  ai-chatter-network:
+    driver: bridge
+
+volumes:
+  # Docker данные основного бота
+  ai-chatter-docker-data:
+    driver: local
+  # VibeCoding сессии
+  vibecoding-sessions:
+    driver: local

@@ -1,0 +1,637 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VibeCoding Web Interface</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #1e1e1e;
+            color: #ffffff;
+            line-height: 1.6;
+        }
+
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+
+        .header {
+            text-align: center;
+            margin-bottom: 30px;
+            border-bottom: 2px solid #333;
+            padding-bottom: 20px;
+        }
+
+        .header h1 {
+            color: #4CAF50;
+            margin-bottom: 10px;
+        }
+
+        .status {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 14px;
+            font-weight: bold;
+        }
+
+        .status.connected {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        .status.disconnected {
+            background-color: #f44336;
+            color: white;
+        }
+
+        .main-content {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 20px;
+            height: calc(100vh - 200px);
+        }
+
+        .sidebar {
+            background-color: #2d2d2d;
+            border-radius: 8px;
+            padding: 20px;
+            overflow-y: auto;
+        }
+
+        .sidebar h3 {
+            margin-bottom: 15px;
+            color: #4CAF50;
+        }
+
+        .user-input {
+            margin-bottom: 20px;
+        }
+
+        .user-input input {
+            width: 100%;
+            padding: 10px;
+            border: 1px solid #555;
+            border-radius: 4px;
+            background-color: #3d3d3d;
+            color: white;
+            font-size: 16px;
+        }
+
+        .file-list {
+            list-style: none;
+        }
+
+        .file-item {
+            padding: 8px 12px;
+            margin: 5px 0;
+            background-color: #3d3d3d;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+
+        .file-item:hover {
+            background-color: #4d4d4d;
+        }
+
+        .file-item.selected {
+            background-color: #4CAF50;
+        }
+
+        .main-panel {
+            background-color: #2d2d2d;
+            border-radius: 8px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .tabs {
+            display: flex;
+            margin-bottom: 20px;
+            border-bottom: 1px solid #555;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-bottom: 2px solid transparent;
+            transition: all 0.2s;
+        }
+
+        .tab:hover {
+            background-color: #3d3d3d;
+        }
+
+        .tab.active {
+            border-bottom-color: #4CAF50;
+            color: #4CAF50;
+        }
+
+        .tab-content {
+            flex: 1;
+            display: none;
+        }
+
+        .tab-content.active {
+            display: flex;
+            flex-direction: column;
+        }
+
+        .code-editor {
+            flex: 1;
+            background-color: #1e1e1e;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            color: #ffffff;
+            resize: none;
+            outline: none;
+        }
+
+        .terminal {
+            flex: 1;
+            background-color: #000000;
+            border: 1px solid #555;
+            border-radius: 4px;
+            padding: 15px;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            color: #00ff00;
+            overflow-y: auto;
+            white-space: pre-wrap;
+        }
+
+        .command-input {
+            display: flex;
+            margin-top: 10px;
+            gap: 10px;
+        }
+
+        .command-input input {
+            flex: 1;
+            padding: 10px;
+            border: 1px solid #555;
+            border-radius: 4px;
+            background-color: #3d3d3d;
+            color: white;
+            font-family: 'Courier New', monospace;
+        }
+
+        .btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+            font-weight: bold;
+            transition: background-color 0.2s;
+        }
+
+        .btn-primary {
+            background-color: #4CAF50;
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background-color: #45a049;
+        }
+
+        .btn-secondary {
+            background-color: #666;
+            color: white;
+        }
+
+        .btn-secondary:hover {
+            background-color: #777;
+        }
+
+        .session-info {
+            background-color: #3d3d3d;
+            padding: 15px;
+            border-radius: 4px;
+            margin-bottom: 20px;
+        }
+
+        .session-info h4 {
+            color: #4CAF50;
+            margin-bottom: 10px;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+        }
+
+        .loading {
+            text-align: center;
+            color: #888;
+            font-style: italic;
+        }
+
+        .error {
+            color: #f44336;
+            background-color: rgba(244, 67, 54, 0.1);
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+
+        .success {
+            color: #4CAF50;
+            background-color: rgba(76, 175, 80, 0.1);
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🔥 VibeCoding Web Interface</h1>
+            <p>External web interface communicating via MCP</p>
+            <div id="connection-status" class="status disconnected">Disconnected</div>
+        </div>
+
+        <div class="main-content">
+            <div class="sidebar">
+                <h3>🎯 Session</h3>
+                <div class="user-input">
+                    <input type="number" id="user-id" placeholder="Enter User ID" value="123456">
+                    <button class="btn btn-primary" style="width: 100%; margin-top: 10px;" onclick="loadSession()">Load Session</button>
+                </div>
+
+                <div id="session-info" class="session-info" style="display: none;">
+                    <h4>Session Info</h4>
+                    <div id="session-details"></div>
+                </div>
+
+                <h3>📁 Files</h3>
+                <div id="file-list-container">
+                    <div class="loading">No session loaded</div>
+                </div>
+            </div>
+
+            <div class="main-panel">
+                <div class="tabs">
+                    <div class="tab active" onclick="switchTab('editor')">📝 Editor</div>
+                    <div class="tab" onclick="switchTab('terminal')">💻 Terminal</div>
+                    <div class="tab" onclick="switchTab('tests')">🧪 Tests</div>
+                </div>
+
+                <div id="editor-tab" class="tab-content active">
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <h4 id="current-file">No file selected</h4>
+                        <div>
+                            <button class="btn btn-secondary" onclick="saveFile()">💾 Save</button>
+                        </div>
+                    </div>
+                    <textarea id="code-editor" class="code-editor" placeholder="Select a file to edit..."></textarea>
+                </div>
+
+                <div id="terminal-tab" class="tab-content">
+                    <div id="terminal-output" class="terminal">VibeCoding Terminal - Ready
+$ </div>
+                    <div class="command-input">
+                        <input type="text" id="command-input" placeholder="Enter command..." onkeypress="handleCommandKeypress(event)">
+                        <button class="btn btn-primary" onclick="executeCommand()">Run</button>
+                    </div>
+                </div>
+
+                <div id="tests-tab" class="tab-content">
+                    <div style="margin-bottom: 20px;">
+                        <h4>🧪 Test Runner</h4>
+                        <button class="btn btn-primary" onclick="runTests()">Run Tests</button>
+                    </div>
+                    <div id="test-output" class="terminal">Click "Run Tests" to execute tests...
+</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let currentUserId = null;
+        let currentFileName = null;
+        let sessionInfo = null;
+
+        // Check server status
+        async function checkStatus() {
+            try {
+                const response = await fetch('/api/status');
+                const data = await response.json();
+                
+                const statusElement = document.getElementById('connection-status');
+                if (data.success && data.mcpConnected) {
+                    statusElement.textContent = 'Connected to MCP';
+                    statusElement.className = 'status connected';
+                } else {
+                    statusElement.textContent = 'MCP Disconnected';
+                    statusElement.className = 'status disconnected';
+                }
+            } catch (error) {
+                console.error('Failed to check status:', error);
+                const statusElement = document.getElementById('connection-status');
+                statusElement.textContent = 'Server Error';
+                statusElement.className = 'status disconnected';
+            }
+        }
+
+        // Load session for user
+        async function loadSession() {
+            const userIdInput = document.getElementById('user-id');
+            const userId = parseInt(userIdInput.value);
+            
+            if (!userId) {
+                showError('Please enter a valid User ID');
+                return;
+            }
+
+            currentUserId = userId;
+            
+            try {
+                // Get session info
+                const sessionResponse = await fetch(`/api/session/${userId}`);
+                const sessionData = await sessionResponse.json();
+                
+                if (sessionData.success) {
+                    sessionInfo = sessionData.session;
+                    displaySessionInfo(sessionInfo);
+                    await loadFiles();
+                } else {
+                    showError(sessionData.error || 'Session not found');
+                    document.getElementById('session-info').style.display = 'none';
+                }
+            } catch (error) {
+                console.error('Failed to load session:', error);
+                showError('Failed to load session: ' + error.message);
+            }
+        }
+
+        // Display session information
+        function displaySessionInfo(info) {
+            const sessionDiv = document.getElementById('session-info');
+            const detailsDiv = document.getElementById('session-details');
+            
+            detailsDiv.innerHTML = `
+                <div class="info-row"><span>Status:</span><span>${info.status || 'Unknown'}</span></div>
+                <div class="info-row"><span>Container:</span><span>${info.container_id || 'None'}</span></div>
+                <div class="info-row"><span>Test Command:</span><span>${info.test_command || 'None'}</span></div>
+                <div class="info-row"><span>Created:</span><span>${info.created_at ? new Date(info.created_at).toLocaleString() : 'Unknown'}</span></div>
+            `;
+            
+            sessionDiv.style.display = 'block';
+        }
+
+        // Load files from session
+        async function loadFiles() {
+            if (!currentUserId) return;
+            
+            const container = document.getElementById('file-list-container');
+            container.innerHTML = '<div class="loading">Loading files...</div>';
+            
+            try {
+                const response = await fetch(`/api/files/${currentUserId}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    displayFiles(data.files);
+                } else {
+                    container.innerHTML = `<div class="error">${data.error}</div>`;
+                }
+            } catch (error) {
+                console.error('Failed to load files:', error);
+                container.innerHTML = `<div class="error">Failed to load files: ${error.message}</div>`;
+            }
+        }
+
+        // Display file list
+        function displayFiles(files) {
+            const container = document.getElementById('file-list-container');
+            
+            if (files.length === 0) {
+                container.innerHTML = '<div class="loading">No files found</div>';
+                return;
+            }
+            
+            const fileList = document.createElement('ul');
+            fileList.className = 'file-list';
+            
+            files.forEach(file => {
+                const li = document.createElement('li');
+                li.className = 'file-item';
+                li.textContent = file;
+                li.onclick = () => selectFile(file);
+                fileList.appendChild(li);
+            });
+            
+            container.innerHTML = '';
+            container.appendChild(fileList);
+        }
+
+        // Select and load file
+        async function selectFile(filename) {
+            if (!currentUserId) return;
+            
+            // Update UI
+            document.querySelectorAll('.file-item').forEach(item => {
+                item.classList.remove('selected');
+                if (item.textContent === filename) {
+                    item.classList.add('selected');
+                }
+            });
+            
+            currentFileName = filename;
+            document.getElementById('current-file').textContent = filename;
+            
+            // Load file content
+            try {
+                const response = await fetch(`/api/files/${currentUserId}/${encodeURIComponent(filename)}`);
+                const data = await response.json();
+                
+                if (data.success) {
+                    document.getElementById('code-editor').value = data.content;
+                } else {
+                    showError(data.error);
+                }
+            } catch (error) {
+                console.error('Failed to load file:', error);
+                showError('Failed to load file: ' + error.message);
+            }
+        }
+
+        // Save current file
+        async function saveFile() {
+            if (!currentUserId || !currentFileName) {
+                showError('No file selected');
+                return;
+            }
+            
+            const content = document.getElementById('code-editor').value;
+            
+            try {
+                const response = await fetch(`/api/files/${currentUserId}/${encodeURIComponent(currentFileName)}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ content })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showSuccess('File saved successfully');
+                } else {
+                    showError(data.error);
+                }
+            } catch (error) {
+                console.error('Failed to save file:', error);
+                showError('Failed to save file: ' + error.message);
+            }
+        }
+
+        // Execute command
+        async function executeCommand() {
+            if (!currentUserId) {
+                showError('No session loaded');
+                return;
+            }
+            
+            const commandInput = document.getElementById('command-input');
+            const command = commandInput.value.trim();
+            
+            if (!command) return;
+            
+            const terminal = document.getElementById('terminal-output');
+            terminal.textContent += `$ ${command}\n`;
+            
+            commandInput.value = '';
+            commandInput.disabled = true;
+            
+            try {
+                const response = await fetch(`/api/execute/${currentUserId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ command })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success !== false) {
+                    terminal.textContent += data.output + '\n';
+                } else {
+                    terminal.textContent += `Error: ${data.error}\n`;
+                }
+                
+                terminal.textContent += '$ ';
+                terminal.scrollTop = terminal.scrollHeight;
+                
+            } catch (error) {
+                console.error('Failed to execute command:', error);
+                terminal.textContent += `Error: ${error.message}\n$ `;
+            } finally {
+                commandInput.disabled = false;
+                commandInput.focus();
+            }
+        }
+
+        // Run tests
+        async function runTests() {
+            if (!currentUserId) {
+                showError('No session loaded');
+                return;
+            }
+            
+            const testOutput = document.getElementById('test-output');
+            testOutput.textContent = 'Running tests...\n';
+            
+            try {
+                const response = await fetch(`/api/test/${currentUserId}`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({})
+                });
+                
+                const data = await response.json();
+                
+                const status = data.success ? '✅ PASSED' : '❌ FAILED';
+                testOutput.textContent = `Test Status: ${status}\n\n${data.output}\n`;
+                
+            } catch (error) {
+                console.error('Failed to run tests:', error);
+                testOutput.textContent = `Error running tests: ${error.message}\n`;
+            }
+        }
+
+        // Handle command input keypress
+        function handleCommandKeypress(event) {
+            if (event.key === 'Enter') {
+                executeCommand();
+            }
+        }
+
+        // Switch tabs
+        function switchTab(tabName) {
+            // Update tab buttons
+            document.querySelectorAll('.tab').forEach(tab => {
+                tab.classList.remove('active');
+            });
+            event.target.classList.add('active');
+            
+            // Update tab content
+            document.querySelectorAll('.tab-content').forEach(content => {
+                content.classList.remove('active');
+            });
+            document.getElementById(`${tabName}-tab`).classList.add('active');
+        }
+
+        // Utility functions
+        function showError(message) {
+            console.error(message);
+            // You could add a toast notification here
+        }
+
+        function showSuccess(message) {
+            console.log(message);
+            // You could add a toast notification here
+        }
+
+        // Initialize page
+        document.addEventListener('DOMContentLoaded', () => {
+            checkStatus();
+            setInterval(checkStatus, 30000); // Check status every 30 seconds
+            
+            // Check for user parameter in URL and auto-load session
+            const urlParams = new URLSearchParams(window.location.search);
+            const userParam = urlParams.get('user');
+            if (userParam) {
+                const userIdInput = document.getElementById('user-id');
+                userIdInput.value = userParam;
+                // Auto-load session after a short delay to ensure status is checked first
+                setTimeout(() => {
+                    loadSession();
+                }, 1000);
+            }
+        });
+    </script>
+</body>
+</html>

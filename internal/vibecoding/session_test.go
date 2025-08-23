@@ -90,8 +90,8 @@ func TestSessionManager_GetSession(t *testing.T) {
 	}
 
 	// Get session
-	retrievedSession, exists := sm.GetSession(123)
-	if !exists {
+	retrievedSession := sm.GetSession(123)
+	if retrievedSession == nil {
 		t.Error("Session should exist")
 	}
 
@@ -100,8 +100,8 @@ func TestSessionManager_GetSession(t *testing.T) {
 	}
 
 	// Try to get non-existent session
-	_, exists = sm.GetSession(999)
-	if exists {
+	nonExistentSession := sm.GetSession(999)
+	if nonExistentSession != nil {
 		t.Error("Non-existent session should not exist")
 	}
 }
@@ -172,12 +172,12 @@ func TestSessionManager_HasActiveSession(t *testing.T) {
 func TestVibeCodingSession_GenerateTestCommand(t *testing.T) {
 	session := &VibeCodingSession{
 		Analysis: &codevalidation.CodeAnalysisResult{
-			Language: "Python",
-			Commands: []string{}, // No test commands in analysis
+			Language:     "Python",
+			TestCommands: []string{"python -m pytest -v", "python -m unittest discover -v"}, // Test commands in analysis
 		},
 	}
 
-	expected := "python -m pytest -v || python -m unittest discover -v"
+	expected := "python -m pytest -v" // Теперь возвращает первую команду из TestCommands
 	result := session.generateTestCommand()
 	if result != expected {
 		t.Errorf("generateTestCommand() = %s, expected %s", result, expected)
