@@ -16,6 +16,11 @@ All notable changes to this project will be documented in this file.
   - **Conditional MCP Instructions**: Context generation now omits MCP tool instructions when server is unavailable
   - **User-Friendly MCP Status**: Clear messaging when MCP server is not available instead of misleading tool recommendations
   - **Comprehensive MCP Logic**: Updated all VibeCoding components to respect MCP availability in generated contexts and user messages
+- **WebServer Stability Fix**: Fixed critical nil pointer dereference in `/api/sessions` endpoint
+  - **Nil Safety**: Added nil check for `session.Analysis` in `handleSessions()` function  
+  - **Graceful Degradation**: Sessions without Analysis now show "Unknown" language instead of crashing
+  - **Regression Testing**: Added comprehensive test coverage for both nil and valid Analysis cases
+  - **Production Safety**: Eliminated panic serving external HTTP requests from IP addresses
 - **SSE Connection Issues**: Fixed persistent connection refused errors to VibeCoding MCP server
   - **Server Cleanup**: Eliminated conflicting MCP server instances running on multiple ports
   - **Proper Port Management**: HTTP SSE server now runs cleanly on port 8082

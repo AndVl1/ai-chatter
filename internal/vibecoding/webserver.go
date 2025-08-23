@@ -1035,10 +1035,16 @@ func (ws *WebServer) handleSessions(w http.ResponseWriter, r *http.Request) {
 	sessionList := make([]map[string]interface{}, 0, len(sessions))
 
 	for userID, session := range sessions {
+		// Безопасно получаем язык программирования
+		language := "Unknown"
+		if session.Analysis != nil {
+			language = session.Analysis.Language
+		}
+
 		sessionInfo := map[string]interface{}{
 			"user_id":         userID,
 			"project_name":    session.ProjectName,
-			"language":        session.Analysis.Language,
+			"language":        language,
 			"start_time":      session.StartTime,
 			"duration":        time.Since(session.StartTime).Round(time.Second).String(),
 			"container_id":    session.ContainerID,
