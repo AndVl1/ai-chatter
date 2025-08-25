@@ -35,7 +35,7 @@ func (m *MCPClient) Connect(ctx context.Context, notionToken string) error {
 	}, nil)
 
 	// Запускаем наш кастомный MCP сервер как подпроцесс
-	serverPath := "./notion-mcp-server"
+	serverPath := "./bin/notion-mcp-server"
 	if customPath := os.Getenv("NOTION_MCP_SERVER_PATH"); customPath != "" {
 		serverPath = customPath
 	}

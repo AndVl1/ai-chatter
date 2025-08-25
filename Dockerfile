@@ -17,6 +17,10 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ai-chatter cmd/bot/main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o notion-mcp-server cmd/notion-mcp-server/main.go
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o gmail-mcp-server cmd/gmail-mcp-server/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o github-mcp-server cmd/github-mcp-server/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o rustore-mcp-server cmd/rustore-mcp-server/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o vibecoding-mcp-server cmd/vibecoding-mcp-server/main.go
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o vibecoding-mcp-http-server cmd/vibecoding-mcp-http-server/main.go
 
 # Минимальный образ для production с Docker поддержкой
 FROM docker:24-dind
@@ -30,6 +34,10 @@ WORKDIR /app
 COPY --from=builder /app/ai-chatter .
 COPY --from=builder /app/notion-mcp-server .
 COPY --from=builder /app/gmail-mcp-server .
+COPY --from=builder /app/github-mcp-server .
+COPY --from=builder /app/rustore-mcp-server .
+COPY --from=builder /app/vibecoding-mcp-server .
+COPY --from=builder /app/vibecoding-mcp-http-server .
 
 # Копируем необходимые файлы
 COPY --from=builder /app/prompts ./prompts
@@ -38,7 +46,7 @@ COPY --from=builder /app/prompts ./prompts
 RUN mkdir -p /app/data /app/logs
 
 # Устанавливаем права на выполнение
-RUN chmod +x ./ai-chatter ./notion-mcp-server ./gmail-mcp-server
+RUN chmod +x ./ai-chatter ./notion-mcp-server ./gmail-mcp-server ./github-mcp-server ./rustore-mcp-server ./vibecoding-mcp-server ./vibecoding-mcp-http-server
 
 # Создаем скрипт запуска с Docker daemon
 RUN echo '#!/bin/sh' > /app/start.sh && \
@@ -70,6 +78,14 @@ RUN echo '#!/bin/sh' > /app/start.sh && \
     echo '# Устанавливаем переменные окружения для MCP серверов' >> /app/start.sh && \
     echo 'export NOTION_MCP_SERVER_PATH="/app/notion-mcp-server"' >> /app/start.sh && \
     echo 'export GMAIL_MCP_SERVER_PATH="/app/gmail-mcp-server"' >> /app/start.sh && \
+    echo 'export GITHUB_MCP_SERVER_PATH="/app/github-mcp-server"' >> /app/start.sh && \
+    echo 'export RUSTORE_MCP_SERVER_PATH="/app/rustore-mcp-server"' >> /app/start.sh && \
+    echo 'export VIBECODING_MCP_SERVER_PATH="/app/vibecoding-mcp-server"' >> /app/start.sh && \
+    echo '' >> /app/start.sh && \
+    echo '# Логирование состояния MCP серверов' >> /app/start.sh && \
+    echo 'echo "🔍 MCP Servers Status:"' >> /app/start.sh && \
+    echo 'ls -la /app/*-mcp-server 2>/dev/null || echo "❌ No MCP server binaries found"' >> /app/start.sh && \
+    echo 'echo ""' >> /app/start.sh && \
     echo '' >> /app/start.sh && \
     echo '# Функция graceful shutdown' >> /app/start.sh && \
     echo 'cleanup() {' >> /app/start.sh && \

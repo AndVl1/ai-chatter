@@ -1,5 +1,5 @@
 # AI Chatter - Makefile
-.PHONY: help build test clean ci format integration cross coverage
+.PHONY: help build test clean ci format integration cross coverage mcp-servers mcp-clean
 
 # Переменные
 GO_VERSION := $(shell go version | cut -d' ' -f3)
@@ -26,9 +26,7 @@ help: ## Показать эту справку
 build: ## Собрать все приложения
 	@echo "$(BLUE)🔨 Building applications...$(NC)"
 	@go build -o ai-chatter cmd/bot/main.go
-	@go build -o notion-mcp-server cmd/notion-mcp-server/main.go
-	@go build -o vibecoding-mcp-server cmd/vibecoding-mcp-server/main.go
-	@go build -o vibecoding-mcp-http-server cmd/vibecoding-mcp-http-server/main.go
+	@make mcp-servers
 	@go build -o test-custom-mcp cmd/test-custom-mcp/main.go
 	@echo "$(GREEN)✅ Build completed$(NC)"
 
@@ -42,6 +40,22 @@ coverage: ## Запустить тесты с coverage
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "$(GREEN)✅ Coverage report: coverage.html$(NC)"
 
+mcp-servers: ## Собрать все MCP серверы
+	@echo "$(BLUE)🔧 Building MCP servers...$(NC)"
+	@mkdir -p bin
+	@go build -o bin/notion-mcp-server cmd/notion-mcp-server/main.go
+	@go build -o bin/gmail-mcp-server cmd/gmail-mcp-server/main.go
+	@go build -o bin/github-mcp-server cmd/github-mcp-server/main.go
+	@go build -o bin/rustore-mcp-server cmd/rustore-mcp-server/main.go
+	@go build -o bin/vibecoding-mcp-server cmd/vibecoding-mcp-server/main.go
+	@go build -o bin/vibecoding-mcp-http-server cmd/vibecoding-mcp-http-server/main.go
+	@echo "$(GREEN)✅ MCP servers built in bin/ directory$(NC)"
+
+mcp-clean: ## Очистить собранные MCP серверы
+	@echo "$(BLUE)🧹 Cleaning MCP servers...$(NC)"
+	@rm -rf bin/
+	@echo "$(GREEN)✅ MCP servers cleaned$(NC)"
+
 integration: ## Запустить интеграционные тесты
 	@echo "$(BLUE)🌐 Running integration tests...$(NC)"
 	@./scripts/test-notion-integration.sh
@@ -53,7 +67,8 @@ format: ## Проверить и исправить форматирование
 
 clean: ## Очистить артефакты сборки
 	@echo "$(BLUE)🧹 Cleaning up...$(NC)"
-	@rm -f ai-chatter notion-mcp-server vibecoding-mcp-server vibecoding-mcp-http-server test-custom-mcp
+	@rm -f ai-chatter test-custom-mcp
+	@make mcp-clean
 	@rm -f coverage.out coverage.html *.prof *.log
 	@echo "$(GREEN)✅ Cleanup completed$(NC)"
 

@@ -12,10 +12,12 @@ import (
 
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/config"
+	"ai-chatter/internal/github"
 	"ai-chatter/internal/gmail"
 	"ai-chatter/internal/llm"
 	"ai-chatter/internal/notion"
 	"ai-chatter/internal/pending"
+	"ai-chatter/internal/rustore"
 	"ai-chatter/internal/scheduler"
 	"ai-chatter/internal/storage"
 	"ai-chatter/internal/telegram"
@@ -129,6 +131,51 @@ func main() {
 		log.Printf("GMAIL_CREDENTIALS_JSON or GMAIL_CREDENTIALS_JSON_PATH not set, Gmail functionality disabled")
 	}
 
+	// Initialize GitHub MCP client
+	var githubClient *github.GitHubMCPClient
+	githubToken := os.Getenv("GITHUB_TOKEN")
+
+	log.Printf("🔍 Bot: Checking GitHub token...")
+	log.Printf("📦 Bot: GITHUB_TOKEN available: %v", githubToken != "")
+
+	if githubToken != "" {
+		// Показываем маскированный токен для отладки
+		if len(githubToken) > 8 {
+			maskedToken := githubToken[:4] + "..." + githubToken[len(githubToken)-4:]
+			log.Printf("🔑 Bot: GitHub token: %s (length: %d)", maskedToken, len(githubToken))
+		}
+
+		githubClient = github.NewGitHubMCPClient()
+
+		// Подключаемся к GitHub MCP серверу
+		ctx := context.Background()
+		if err := githubClient.Connect(ctx, githubToken); err != nil {
+			log.Printf("⚠️ Failed to connect to GitHub MCP server: %v", err)
+			log.Printf("GitHub functionality will be disabled")
+			githubClient = nil
+		} else {
+			log.Printf("✅ GitHub MCP client connected successfully")
+		}
+	} else {
+		log.Printf("❌ Bot: GITHUB_TOKEN not set, GitHub functionality disabled")
+		log.Printf("💡 Bot: Please set GITHUB_TOKEN environment variable")
+	}
+
+	// Initialize RuStore MCP client
+	var rustoreClient *rustore.RuStoreMCPClient
+	// RuStore клиент инициализируется без токена - авторизация будет происходить при использовании
+	rustoreClient = rustore.NewRuStoreMCPClient()
+
+	// Подключаемся к RuStore MCP серверу
+	ctx := context.Background()
+	if err := rustoreClient.Connect(ctx); err != nil {
+		log.Printf("⚠️ Failed to connect to RuStore MCP server: %v", err)
+		log.Printf("RuStore functionality will be disabled")
+		rustoreClient = nil
+	} else {
+		log.Printf("✅ RuStore MCP client connected successfully")
+	}
+
 	bot, err := telegram.New(
 		cfg.TelegramBotToken,
 		authSvc,
@@ -144,6 +191,8 @@ func main() {
 		mcpClient,
 		cfg.NotionParentPage,
 		gmailClient,
+		githubClient,
+		rustoreClient,
 	)
 	if err != nil {
 		log.Fatalf("failed to create bot: %v", err)

@@ -34,7 +34,7 @@ func (m *GmailMCPClient) Connect(ctx context.Context, gmailCredentialsJSON strin
 	}, nil)
 
 	// Запускаем Gmail MCP сервер как подпроцесс
-	serverPath := "./gmail-mcp-server"
+	serverPath := "./bin/gmail-mcp-server"
 	if customPath := os.Getenv("GMAIL_MCP_SERVER_PATH"); customPath != "" {
 		serverPath = customPath
 	}
