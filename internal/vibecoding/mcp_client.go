@@ -34,7 +34,7 @@ func (m *VibeCodingMCPClient) Connect(ctx context.Context, sessionManager *Sessi
 	}, nil)
 
 	// Запускаем VibeCoding MCP сервер как подпроцесс
-	serverPath := "./vibecoding-mcp-server"
+	serverPath := "./bin/vibecoding-mcp-server"
 	if customPath := os.Getenv("VIBECODING_MCP_SERVER_PATH"); customPath != "" {
 		serverPath = customPath
 	}

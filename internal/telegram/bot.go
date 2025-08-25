@@ -16,11 +16,14 @@ import (
 	"ai-chatter/internal/analytics"
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/codevalidation"
+	"ai-chatter/internal/github"
 	"ai-chatter/internal/gmail"
 	"ai-chatter/internal/history"
 	"ai-chatter/internal/llm"
 	"ai-chatter/internal/notion"
 	"ai-chatter/internal/pending"
+	"ai-chatter/internal/release"
+	"ai-chatter/internal/rustore"
 	"ai-chatter/internal/storage"
 	"ai-chatter/internal/vibecoding"
 )
@@ -70,6 +73,12 @@ type Bot struct {
 	codeValidationWorkflow *codevalidation.CodeValidationWorkflow
 	// VibeCoding handler
 	vibeCodingHandler *vibecoding.VibeCodingHandler
+	// GitHub integration
+	githubClient *github.GitHubMCPClient
+	// RuStore integration
+	rustoreClient *rustore.RuStoreMCPClient
+	// AI Release Agent
+	releaseAgent *release.ReleaseAgent
 }
 
 func New(
@@ -87,6 +96,8 @@ func New(
 	mcpClient *notion.MCPClient,
 	notionParentPage string,
 	gmailClient *gmail.GmailMCPClient,
+	githubClient *github.GitHubMCPClient,
+	rustoreClient *rustore.RuStoreMCPClient,
 ) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(botToken)
 	if err != nil {
@@ -112,6 +123,16 @@ func New(
 		mcpClient:        mcpClient,
 		notionParentPage: notionParentPage,
 		gmailClient:      gmailClient,
+		githubClient:     githubClient,
+		rustoreClient:    rustoreClient,
+	}
+
+	// Создаем Release Agent если доступны GitHub и RuStore клиенты
+	if githubClient != nil && rustoreClient != nil {
+		b.releaseAgent = release.NewReleaseAgent(githubClient, rustoreClient, llmClient)
+		log.Printf("✅ AI Release Agent initialized")
+	} else {
+		log.Printf("⚠️ AI Release Agent disabled (GitHub or RuStore client missing)")
 	}
 
 	// Инициализируем Gmail workflow если Gmail client доступен

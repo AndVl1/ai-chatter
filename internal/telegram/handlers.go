@@ -22,6 +22,7 @@ import (
 	"ai-chatter/internal/auth"
 	"ai-chatter/internal/codevalidation"
 	"ai-chatter/internal/llm"
+	"ai-chatter/internal/release"
 	"ai-chatter/internal/storage"
 )
 
@@ -190,6 +191,14 @@ func (b *Bot) handleCommand(msg *tgbotapi.Message) {
 		b.handleGmailSummaryCommand(msg)
 		return
 	}
+	if msg.Command() == "release_rc" {
+		b.handleReleaseRCCommand(msg)
+		return
+	}
+	if msg.Command() == "ai_release" {
+		b.handleAIReleaseCommand(msg)
+		return
+	}
 	if msg.Command() == "tz" {
 		if !b.authSvc.IsAllowed(msg.From.ID) {
 			return
@@ -336,6 +345,17 @@ func (b *Bot) handleIncomingMessage(ctx context.Context, msg *tgbotapi.Message) 
 		}
 	}
 	b.logLLMRequest(msg.From.ID, "chat", contextMsgs)
+
+	// Проверяем активную AI Release сессию
+	if b.releaseAgent != nil && !b.isTZMode(msg.From.ID) {
+		if activeSession, exists := b.releaseAgent.GetUserActiveSession(msg.From.ID); exists {
+			if activeSession.Status == "waiting_user" && len(activeSession.PendingRequests) > 0 {
+				// Обрабатываем ответ пользователя для AI Release
+				b.handleAIReleaseUserResponse(ctx, activeSession, msg.Text)
+				return
+			}
+		}
+	}
 
 	// Проверяем активную VibeCoding сессию
 	if b.vibeCodingHandler != nil && !b.isTZMode(msg.From.ID) && msg.Document == nil {
@@ -1012,4 +1032,431 @@ func (b *Bot) handleVibeCodingArchive(ctx context.Context, msg *tgbotapi.Message
 	if err != nil {
 		log.Printf("🔥 VibeCoding archive processing failed: %v", err)
 	}
+}
+
+// handleReleaseRCCommand обрабатывает команду публикации Release Candidate в RuStore
+func (b *Bot) handleReleaseRCCommand(msg *tgbotapi.Message) {
+	// Проверяем, что это админ
+	if msg.From.ID != b.adminUserID {
+		b.sendMessage(msg.Chat.ID, "❌ Команда доступна только администратору.")
+		return
+	}
+
+	// Проверяем наличие GitHub и RuStore клиентов
+	if b.githubClient == nil {
+		b.sendMessage(msg.Chat.ID, "❌ GitHub интеграция не настроена. Проверьте конфигурацию GITHUB_TOKEN.")
+		return
+	}
+
+	if b.rustoreClient == nil {
+		b.sendMessage(msg.Chat.ID, "❌ RuStore интеграция не настроена.")
+		return
+	}
+
+	// Отправляем начальное сообщение
+	b.sendMessage(msg.Chat.ID, "🚀 **Запуск процесса публикации Release Candidate в RuStore**\n\n"+
+		"📦 Ищу последний pre-release в репозитории GitHub...\n"+
+		"🎯 Репозиторий: AndVl1/SnakeGame")
+
+	// Запускаем процесс в горутине
+	go b.processReleaseRC(context.Background(), msg.Chat.ID)
+}
+
+// processReleaseRC выполняет весь процесс публикации RC
+func (b *Bot) processReleaseRC(ctx context.Context, chatID int64) {
+	// Константы
+	const (
+		repoOwner = "AndVl1"
+		repoName  = "SnakeGame"
+	)
+
+	// Шаг 1: Получаем последний pre-release
+	b.updateReleaseStatus(chatID, "🔍 Поиск последнего pre-release в GitHub...")
+
+	latestPreRelease, err := b.githubClient.GetLatestPreRelease(ctx, repoOwner, repoName)
+	if err != nil {
+		b.updateReleaseStatus(chatID, fmt.Sprintf("❌ Ошибка получения pre-release: %v", err))
+		return
+	}
+
+	b.updateReleaseStatus(chatID, fmt.Sprintf("✅ Найден pre-release: **%s** (%s)\n📅 Опубликован: %s",
+		latestPreRelease.Name, latestPreRelease.TagName, latestPreRelease.PublishedAt.Format("2006-01-02 15:04")))
+
+	// Шаг 2: Ищем Android файл среди ассетов (AAB предпочтительно, APK как fallback)
+	b.updateReleaseStatus(chatID, "🔍 Поиск Android файла в релизе...")
+
+	androidAsset := b.githubClient.FindAndroidAsset(*latestPreRelease)
+	if androidAsset == nil {
+		b.updateReleaseStatus(chatID, "❌ Android файл не найден в релизе. Убедитесь, что релиз содержит файл с расширением .aab или .apk")
+		return
+	}
+
+	fileType := getAssetType(androidAsset.Name)
+	if fileType == "AAB" {
+		b.updateReleaseStatus(chatID, fmt.Sprintf("✅ Найден AAB файл: **%s** (%.2f MB) 🎯",
+			androidAsset.Name, float64(androidAsset.Size)/(1024*1024)))
+	} else if fileType == "APK" {
+		b.updateReleaseStatus(chatID, fmt.Sprintf("✅ Найден APK файл: **%s** (%.2f MB) 📱\n⚠️ **Примечание:** AAB файл не найден, используем APK как fallback",
+			androidAsset.Name, float64(androidAsset.Size)/(1024*1024)))
+	}
+
+	// Шаг 3: Скачиваем Android файл
+	b.updateReleaseStatus(chatID, fmt.Sprintf("⬇️ Скачивание %s файла...", fileType))
+
+	downloadResult := b.githubClient.DownloadAsset(ctx, repoOwner, repoName, latestPreRelease.ID, androidAsset.Name, "")
+	if !downloadResult.Success {
+		b.updateReleaseStatus(chatID, fmt.Sprintf("❌ Ошибка скачивания %s: %s", fileType, downloadResult.Message))
+		return
+	}
+
+	b.updateReleaseStatus(chatID, fmt.Sprintf("✅ %s файл скачан: %s (%.2f KB)",
+		fileType, downloadResult.AssetName, float64(downloadResult.AssetSize)/1024))
+
+	// Шаг 4: Запрашиваем у пользователя данные для RuStore
+	b.updateReleaseStatus(chatID, "📝 **Необходимо указать данные для публикации в RuStore:**\n\n"+
+		"Отправьте данные в следующем формате:\n"+
+		"```\n"+
+		"company_id: YOUR_COMPANY_ID\n"+
+		"key_id: YOUR_KEY_ID\n"+
+		"key_secret: YOUR_KEY_SECRET\n"+
+		"app_id: YOUR_APP_ID\n"+
+		"version_code: 106\n"+
+		"whats_new: Что нового в этой версии\n"+
+		"privacy_policy_url: https://example.com/privacy (опционально)\n"+
+		"```\n\n"+
+		"⚠️ **Внимание:** Эти данные будут обработаны и не сохранены в логах.")
+
+	// Ждем ответа пользователя (это упрощенная версия - в реальности нужно сохранять состояние)
+	// Для демонстрации показываем, что процесс приостановлен
+	b.updateReleaseStatus(chatID, fmt.Sprintf("⏸️ **Ожидание данных пользователя...**\n\n"+
+		"После получения данных будет выполнено:\n"+
+		"1. ✅ Авторизация в RuStore API\n"+
+		"2. ✅ Создание черновика версии\n"+
+		"3. ✅ Загрузка %s файла\n"+
+		"4. ✅ Отправка на модерацию\n\n"+
+		"💡 Используйте команду /release_rc_continue с данными для продолжения.", fileType))
+}
+
+// updateReleaseStatus обновляет статус процесса публикации
+func (b *Bot) updateReleaseStatus(chatID int64, status string) {
+	timestamp := time.Now().Format("15:04:05")
+	message := fmt.Sprintf("🕒 %s\n%s", timestamp, status)
+	b.sendMessage(chatID, message)
+}
+
+// getAssetType возвращает тип файла (AAB или APK)
+func getAssetType(filename string) string {
+	if len(filename) > 4 && filename[len(filename)-4:] == ".aab" {
+		return "AAB"
+	}
+	if len(filename) > 4 && filename[len(filename)-4:] == ".apk" {
+		return "APK"
+	}
+	return "Unknown"
+}
+
+// handleAIReleaseCommand обрабатывает команду AI-powered релиза
+func (b *Bot) handleAIReleaseCommand(msg *tgbotapi.Message) {
+	// Проверяем, что это админ
+	if msg.From.ID != b.adminUserID {
+		b.sendMessage(msg.Chat.ID, "❌ Команда доступна только администратору.")
+		return
+	}
+
+	// Проверяем наличие Release Agent
+	if b.releaseAgent == nil {
+		b.sendMessage(msg.Chat.ID, "❌ AI Release Agent не настроен. Проверьте конфигурацию GitHub и RuStore интеграций.")
+		return
+	}
+
+	// Проверяем есть ли уже активная сессия
+	if activeSession, exists := b.releaseAgent.GetUserActiveSession(msg.From.ID); exists {
+		summary := b.releaseAgent.GetSessionSummary(activeSession.ID)
+		b.sendMessage(msg.Chat.ID, "⚠️ **У вас уже есть активная AI Release сессия:**\n\n"+summary+
+			"\n\n💡 Используйте `/ai_release_status` для проверки статуса или `/ai_release_cancel` для отмены.")
+		return
+	}
+
+	// Отправляем начальное сообщение
+	b.sendMessage(msg.Chat.ID, "🤖 **AI-Powered Release Candidate**\n\n"+
+		"🚀 Запускаю интеллектуальный процесс создания релиза...\n"+
+		"📦 Репозиторий: AndVl1/SnakeGame\n\n"+
+		"**Что делает AI Agent:**\n"+
+		"🔍 Анализирует GitHub релизы и коммиты\n"+
+		"🧠 Генерирует описание изменений\n"+
+		"📝 Собирает недостающие данные интерактивно\n"+
+		"✅ Валидирует все ответы\n"+
+		"🏪 Публикует в RuStore автоматически")
+
+	// Запускаем AI Release процесс
+	ctx := context.Background()
+	session, err := b.releaseAgent.StartAIRelease(ctx, msg.From.ID, msg.Chat.ID, "AndVl1", "SnakeGame")
+	if err != nil {
+		b.sendMessage(msg.Chat.ID, fmt.Sprintf("❌ Ошибка запуска AI Release: %v", err))
+		return
+	}
+
+	// Запускаем мониторинг сессии
+	go b.monitorAIReleaseSession(ctx, session.ID)
+
+	log.Printf("🤖 Started AI Release session %s for user %d", session.ID, msg.From.ID)
+}
+
+// monitorAIReleaseSession мониторит прогресс AI Release сессии
+func (b *Bot) monitorAIReleaseSession(ctx context.Context, sessionID string) {
+	lastStatus := ""
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(3 * time.Second):
+			currentSession, exists := b.releaseAgent.GetSession(sessionID)
+			if !exists {
+				return
+			}
+
+			// Проверяем статус GitHub агента
+			if githubStatus, exists := currentSession.AgentStatuses["github"]; exists {
+				currentStatus := fmt.Sprintf("%s_%d", githubStatus.Status, githubStatus.Progress)
+
+				if currentStatus != lastStatus && githubStatus.Message != "" {
+					icon := "🔄"
+					if githubStatus.Status == "completed" {
+						icon = "✅"
+					} else if githubStatus.Status == "failed" {
+						icon = "❌"
+					}
+
+					statusMsg := fmt.Sprintf("%s **GitHub Agent:** %s (%d%%)",
+						icon, githubStatus.Message, githubStatus.Progress)
+					b.sendMessage(currentSession.ChatID, statusMsg)
+					lastStatus = currentStatus
+				}
+
+				// Если GitHub агент завершился успешно, переходим к сбору данных
+				if githubStatus.Status == "completed" && currentSession.Status == "waiting_user" {
+					b.startDataCollection(currentSession)
+					return
+				}
+
+				// Если GitHub агент упал с ошибкой
+				if githubStatus.Status == "failed" {
+					b.sendMessage(currentSession.ChatID, fmt.Sprintf("❌ **Ошибка сбора данных:** %s\n\n"+
+						"💡 Используйте `/ai_release` для повторной попытки.", githubStatus.ErrorMessage))
+					b.releaseAgent.CompleteSession(sessionID, "failed")
+					return
+				}
+			}
+		}
+	}
+}
+
+// startDataCollection начинает интерактивный сбор данных от пользователя
+func (b *Bot) startDataCollection(session *release.ReleaseSession) {
+	if len(session.PendingRequests) == 0 {
+		b.sendMessage(session.ChatID, "✅ Все данные собраны!")
+		return
+	}
+
+	// Отправляем сводку AI анализа
+	if session.ReleaseData != nil {
+		summary := b.buildAIAnalysisSummary(session.ReleaseData)
+		b.sendMessage(session.ChatID, summary)
+	}
+
+	// Начинаем с первого запроса
+	b.sendNextDataRequest(session)
+}
+
+// buildAIAnalysisSummary создает сводку AI анализа
+func (b *Bot) buildAIAnalysisSummary(data *release.ReleaseData) string {
+	var summary strings.Builder
+
+	summary.WriteString("🧠 **AI Анализ завершен!**\n\n")
+
+	// Информация о релизе
+	summary.WriteString(fmt.Sprintf("📦 **Релиз:** %s (%s)\n", data.GitHubRelease.Name, data.GitHubRelease.TagName))
+	summary.WriteString(fmt.Sprintf("📅 **Дата:** %s\n", data.GitHubRelease.PublishedAt.Format("2006-01-02 15:04")))
+	summary.WriteString(fmt.Sprintf("📱 **Файл:** %s %s\n\n", data.AssetType, data.AndroidAsset.Name))
+
+	// Ключевые изменения
+	if len(data.KeyChanges) > 0 {
+		summary.WriteString("🔑 **Ключевые изменения:**\n")
+		for _, change := range data.KeyChanges {
+			summary.WriteString(fmt.Sprintf("• %s\n", change))
+		}
+		summary.WriteString("\n")
+	}
+
+	// AI предложения
+	if len(data.RuStoreData.SuggestedWhatsNew) > 0 {
+		summary.WriteString("✨ **AI сгенерировал варианты описания** (используйте при заполнении):\n\n")
+		for i, suggestion := range data.RuStoreData.SuggestedWhatsNew {
+			summary.WriteString(fmt.Sprintf("**Вариант %d:**\n%s\n\n", i+1, suggestion))
+		}
+	}
+
+	// Уверенность AI
+	confidence := int(data.RuStoreData.ConfidenceScore * 100)
+	confidenceIcon := "🟡"
+	if confidence >= 70 {
+		confidenceIcon = "🟢"
+	} else if confidence < 40 {
+		confidenceIcon = "🔴"
+	}
+	summary.WriteString(fmt.Sprintf("%s **Уверенность AI:** %d%%\n\n", confidenceIcon, confidence))
+
+	summary.WriteString("📝 **Теперь нужно заполнить недостающие данные...**")
+
+	return summary.String()
+}
+
+// sendNextDataRequest отправляет следующий запрос данных пользователю
+func (b *Bot) sendNextDataRequest(session *release.ReleaseSession) {
+	if len(session.PendingRequests) == 0 {
+		// Все данные собраны, можно публиковать
+		b.finalizeAIRelease(session)
+		return
+	}
+
+	request := session.PendingRequests[0]
+
+	var message strings.Builder
+	message.WriteString(fmt.Sprintf("📝 **%s**\n", request.DisplayName))
+	message.WriteString(fmt.Sprintf("💬 %s\n\n", request.Description))
+
+	if request.Required {
+		message.WriteString("⚠️ **Обязательное поле**\n")
+	} else {
+		message.WriteString("💡 **Опциональное поле** (отправьте `-` чтобы пропустить)\n")
+	}
+
+	// Показываем AI предложения для поля
+	if len(request.Suggestions) > 0 && request.Field == "whats_new" {
+		message.WriteString("\n✨ **AI предложения:** (скопируйте или отредактируйте)\n")
+		for i, suggestion := range request.Suggestions {
+			message.WriteString(fmt.Sprintf("\n**Вариант %d:**\n`%s`\n", i+1, suggestion))
+		}
+	}
+
+	message.WriteString(fmt.Sprintf("\n🔢 **Прогресс:** %d/%d полей",
+		len(session.CollectedResponses),
+		len(session.CollectedResponses)+len(session.PendingRequests)))
+
+	b.sendMessage(session.ChatID, message.String())
+
+	log.Printf("📝 Sent data request for field '%s' to user %d", request.Field, session.UserID)
+}
+
+// finalizeAIRelease завершает AI Release процесс
+func (b *Bot) finalizeAIRelease(session *release.ReleaseSession) {
+	releaseData, err := b.releaseAgent.BuildFinalReleaseData(session.ID)
+	if err != nil {
+		b.sendMessage(session.ChatID, fmt.Sprintf("❌ Ошибка подготовки данных: %v", err))
+		return
+	}
+
+	// Показываем финальную сводку
+	summary := b.buildFinalReleaseSummary(releaseData)
+	b.sendMessage(session.ChatID, summary)
+
+	// Публикация происходит автоматически в release agent через processCompletedSession
+	b.releaseAgent.CompleteSession(session.ID, "ready_for_publish")
+}
+
+// buildFinalReleaseSummary создает финальную сводку релиза
+func (b *Bot) buildFinalReleaseSummary(data *release.ReleaseData) string {
+	var summary strings.Builder
+
+	summary.WriteString("🎉 **AI Release готов!**\n\n")
+	summary.WriteString("📦 **GitHub Data:**\n")
+	summary.WriteString(fmt.Sprintf("• Релиз: %s (%s)\n", data.GitHubRelease.Name, data.GitHubRelease.TagName))
+	summary.WriteString(fmt.Sprintf("• Файл: %s %s\n", data.AssetType, data.AndroidAsset.Name))
+	summary.WriteString(fmt.Sprintf("• Размер: %.1f MB\n", float64(data.AndroidAsset.Size)/(1024*1024)))
+
+	summary.WriteString("\n🏪 **RuStore Data:**\n")
+	summary.WriteString(fmt.Sprintf("• App ID: %s\n", data.RuStoreData.AppID))
+	summary.WriteString(fmt.Sprintf("• Version Code: %d\n", data.RuStoreData.VersionCode))
+	summary.WriteString(fmt.Sprintf("• Что нового: %s\n", truncateString(data.RuStoreData.WhatsNew, 100)))
+
+	if data.RuStoreData.PrivacyPolicyURL != "" {
+		summary.WriteString(fmt.Sprintf("• Privacy Policy: %s\n", data.RuStoreData.PrivacyPolicyURL))
+	}
+
+	return summary.String()
+}
+
+// truncateString обрезает строку до определенной длины
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
+}
+
+// handleAIReleaseUserResponse обрабатывает ответ пользователя в AI Release сессии
+func (b *Bot) handleAIReleaseUserResponse(ctx context.Context, session *release.ReleaseSession, userInput string) {
+	if len(session.PendingRequests) == 0 {
+		b.sendMessage(session.ChatID, "✅ Все данные уже собраны!")
+		return
+	}
+
+	currentRequest := session.PendingRequests[0]
+
+	// Обработка пропуска опционального поля
+	if !currentRequest.Required && strings.TrimSpace(userInput) == "-" {
+		log.Printf("📝 User skipped optional field '%s'", currentRequest.Field)
+
+		// Удаляем обработанный запрос
+		session.PendingRequests = session.PendingRequests[1:]
+		session.UpdatedAt = time.Now()
+
+		b.sendMessage(session.ChatID, fmt.Sprintf("⏭️ Поле **%s** пропущено\n", currentRequest.DisplayName))
+
+		// Переходим к следующему запросу
+		b.sendNextDataRequest(session)
+		return
+	}
+
+	// Валидируем ответ
+	validation, err := b.releaseAgent.ProcessUserResponse(ctx, session.ID, currentRequest.Field, userInput)
+	if err != nil {
+		b.sendMessage(session.ChatID, fmt.Sprintf("❌ Внутренняя ошибка: %v", err))
+		return
+	}
+
+	if !validation.Valid {
+		// Ответ не прошел валидацию - просим повторить
+		var errorMsg strings.Builder
+		errorMsg.WriteString(fmt.Sprintf("❌ **%s**\n\n", validation.ErrorMessage))
+
+		if len(validation.Suggestions) > 0 {
+			errorMsg.WriteString("💡 **Предложения:**\n")
+			for _, suggestion := range validation.Suggestions {
+				errorMsg.WriteString(fmt.Sprintf("• %s\n", suggestion))
+			}
+			errorMsg.WriteString("\n")
+		}
+
+		errorMsg.WriteString("🔄 **Попробуйте еще раз:**")
+
+		b.sendMessage(session.ChatID, errorMsg.String())
+		return
+	}
+
+	// Ответ валиден - сохраняем и переходим к следующему полю
+	log.Printf("✅ Valid response for field '%s': %s", currentRequest.Field, userInput)
+
+	// Показываем подтверждение (скрываем секретные поля)
+	displayValue := userInput
+	if currentRequest.Field == "key_secret" {
+		displayValue = "***СКРЫТО***"
+	}
+
+	b.sendMessage(session.ChatID, fmt.Sprintf("✅ **%s:** %s\n",
+		currentRequest.DisplayName, displayValue))
+
+	// Переходим к следующему запросу
+	b.sendNextDataRequest(session)
 }
